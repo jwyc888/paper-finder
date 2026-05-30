@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# paper-finder data & generated artifacts
+*.db
+graph_viz*.html
+sample_inbox/
+cli_inbox/
+my_inbox/
+
+# secrets / local config — NEVER commit
+.env
+credentials.json
+token.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

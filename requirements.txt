@@ -1,0 +1,14 @@
+# Primary install is `pip install -e .` (see pyproject.toml). This mirrors the
+# core dependencies for environments that prefer requirements.txt.
+pypdf>=4.0
+fastapi>=0.110
+uvicorn>=0.29
+reportlab>=4.0
+python-dotenv>=1.0
+
+# Optional extras (or: pip install -e ".[st]" / ".[sqlitevec]" / ".[qdrant]" / ".[drive]")
+# sentence-transformers>=2.7        # PAPERFINDER_EMBEDDER=st
+# sqlite-vec>=0.1.6                  # PAPERFINDER_VECTOR_STORE=sqlite-vec
+# qdrant-client>=1.9                # PAPERFINDER_VECTOR_STORE=qdrant
+# google-api-python-client>=2.0     # Drive
+# google-auth-oauthlib>=1.0         # Drive OAuth
