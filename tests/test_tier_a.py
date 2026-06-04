@@ -18,8 +18,9 @@ from paperfinder.graph.viz import build_viz
 from paperfinder.sampledata import build_sample_inbox
 
 INBOX = "sample_inbox"
-DB = "paperfinder.db"
+DB = "test_tier_a.db"
 HTML = "graph_viz_tier_a.html"
+REL_DB = "test_tier_a_rel.db"
 
 
 def titles(results):
@@ -32,7 +33,7 @@ def is_sentiment(title):
 
 
 def main() -> int:
-    for p in (DB, "relationships.db"):
+    for p in (DB, REL_DB):
         if os.path.exists(p):
             os.remove(p)
     n_files = build_sample_inbox(INBOX)
@@ -82,13 +83,16 @@ def main() -> int:
                    (not tricky_before) and tricky_after))
 
     os.environ["PAPERFINDER_DB"] = DB
-    from fastapi.testclient import TestClient
-    from paperfinder import api
-    resp = TestClient(api.app).get("/search", params={"q": Q, "k": 3})
-    checks.append(("query API returns ranked hits",
-                   resp.status_code == 200 and len(resp.json()["results"]) > 0))
+    try:
+        from fastapi.testclient import TestClient
+        from paperfinder import api
+        resp = TestClient(api.app).get("/search", params={"q": Q, "k": 3})
+        checks.append(("query API returns ranked hits",
+                       resp.status_code == 200 and len(resp.json()["results"]) > 0))
+    except (ImportError, RuntimeError):
+        print('  [skip] query API check needs the dev extra: pip install -e ".[dev]"')
 
-    rg = RelationshipGraph("relationships.db")
+    rg = RelationshipGraph(REL_DB)
     for d in pf.all_documents():
         rg.add_document(d["doc_id"], d["title"], json.loads(d["descriptors"] or "[]"),
                         pf.store.get(d["doc_id"]) or [], source_url=d["source_url"])

@@ -54,10 +54,10 @@ class Parser:
             title = meta_title.strip() or _first_line(page0) or ref.name
             return {"title": title, "first_text": page0[:2000],
                     "doi": _doi(page0), "kind": "pdf"}
-        if ref.kind in ("text",):
-            txt = _decode(data)
+        if ref.kind in ("text", "docx", "pptx"):
+            txt = Parser.full(ref, data)  # these formats are small; read once
             return {"title": _first_line(txt) or ref.name,
-                    "first_text": txt[:2000], "doi": _doi(txt), "kind": "text"}
+                    "first_text": txt[:2000], "doi": _doi(txt), "kind": ref.kind}
         # url / other: nothing to parse cheaply
         return {"title": ref.name, "first_text": "", "doi": None, "kind": ref.kind}
 
@@ -72,6 +72,47 @@ class Parser:
                 return ""
         if ref.kind == "text":
             return _decode(data)
+        if ref.kind == "docx":
+            return _docx_text(data)
+        if ref.kind == "pptx":
+            return _pptx_text(data)
+        return ""
+
+
+def _docx_text(data: bytes) -> str:
+    """Text from a .docx (paragraphs + table cells). Graceful if the optional
+    `python-docx` dependency is missing (install the `office` extra)."""
+    try:
+        import docx
+    except ImportError:
+        return ""
+    try:
+        d = docx.Document(io.BytesIO(data))
+        parts = [p.text for p in d.paragraphs]
+        for table in d.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return "\n".join(t for t in parts if t)
+    except Exception:
+        return ""
+
+
+def _pptx_text(data: bytes) -> str:
+    """Text from a .pptx (all text-bearing shapes across slides). Graceful if the
+    optional `python-pptx` dependency is missing."""
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return ""
+    try:
+        prs = Presentation(io.BytesIO(data))
+        parts = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame and shape.text_frame.text:
+                    parts.append(shape.text_frame.text)
+        return "\n".join(parts)
+    except Exception:
         return ""
 
 

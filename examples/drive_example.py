@@ -23,7 +23,7 @@ from paperfinder.core.capture import GoogleDriveSource, find_folder_ids
 load_dotenv()
 
 # ---- the names of YOUR Drive folders to index (subfolders are included) ----
-FOLDER_NAMES = ["Papers", "Literature", "Reading"]   # <-- edit to your real folder names
+FOLDER_NAMES = ["MyResearch"]   # <-- edit to your real folder names
 DB = os.environ.get("PAPERFINDER_DB", "paperfinder.db")
 
 

@@ -12,8 +12,8 @@ import sys
 from paperfinder.graph.relationship import RelationshipGraph
 from paperfinder.graph.viz import build_viz
 
-DB = "relationships.db"
-HTML = "graph_viz.html"
+DB = "test_relationship.db"
+HTML = "graph_viz_relationship.html"
 
 # 6 latent axes: [sentiment, chatbot, clinical, kg, drug, trust]
 CORPUS = [

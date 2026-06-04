@@ -1,48 +1,58 @@
 # PAPER FINDER — MEMORY BANK
 
-**Version:** 2.0
-**Status:** Tier A + relationship layer v0 BUILT and verified (self-test green). Running locally; Drive + real embedder are the wire-up steps.
+**Version:** 2.1
+**Status:** Tier A + relationship layer BUILT and verified, including **live against a real Google Drive** (scoped crawl, Drive-shortcut following, in-place PDF/Word/PowerPoint extraction, reconcile). Remaining wire-up: swap in the real embedder (`STEmbedder`) before indexing the full corpus.
 **Working name:** `paper-finder` (placeholder — broader than papers; rename at will)
 **Owner:** John Chan / BioRatio
 **Relationship to Cortex:** Standalone tool. Cortex is the orchestrator that *calls* it; the finder does not live inside Cortex.
 
 ## 0. Implementation status (what exists today)
 
-Built, runs, and passes an 8-check self-test (`run_tier_a.py`):
+Built, runs, and passes four self-test suites under `tests/` (`test_tier_a`,
+`test_relationship`, `test_drive_and_reconcile`, `test_filetypes`), each using its own
+throwaway DB so the real index is never touched. Installed as a package (`pip install -e .`,
+`paperfinder` command). Layout: `paperfinder/core/` (capture, finder, vectorstore),
+`paperfinder/graph/` (relationship, viz), plus `api.py`, `cli.py`, `sampledata.py`.
 
-- **Capture seam** (`capture.py`): `LocalFolderSource` (runnable) + `GoogleDriveSource`
-  — scoped, **in-place**, over a curation folder: `crawl()` follows **folder + file aliases
-  (shortcuts)** to their targets even outside the folder, keyed to target id (dedup); `poll()`
-  watches resolved folders for new papers; `find_folder_ids` resolves names→ids;
-  `run_backfill` drives it. Mix of physically-moved folders and aliases supported. Shared
-  Drives intentionally out of scope for now. Verified against a mock Drive service.
+- **Capture seam** (`core/capture.py`): `LocalFolderSource` + `GoogleDriveSource`
+  — scoped, **in-place**, over a curation folder: `crawl()` follows **Google Drive
+  shortcuts** (folder + file) to their targets even outside the folder, keyed to target id
+  (dedup); `poll()` watches resolved folders for new papers; `find_folder_ids` resolves
+  names→ids; `run_backfill` drives it. Mix of physically-moved folders and shortcuts
+  supported. Shared Drives intentionally out of scope. **Verified live against a real Drive.**
+  Note: aliases must be **Drive shortcuts**, not macOS Finder aliases — a Finder alias syncs
+  as opaque `application/drive-fs.osx.alias` the API can't resolve; the crawl warns and skips it.
 - **Reconcile** (`PaperFinder.reconcile`, run by `backfill`): papers no longer reachable
-  (deleted, or folder/alias removed) are **archived** — dropped from search, row + authenticated
+  (deleted, or folder/shortcut removed) are **archived** — dropped from search, row + authenticated
   relationships preserved, reversible on re-index. Local index only, never touches Drive.
-  Verified end-to-end (removed paper archived; verified edge survives).
-- **Core** (`paperfinder.py`): SQLite job queue with durable rehydrate (passes re-runnable),
-  parser (pypdf + text), staged metadata pass (instant, FTS) + embed pass (full text + vectors),
-  hybrid search (FTS5 BM25 + dense, fused by RRF). `doc_id` = canonical identity.
-- **Vector seam** (`vectorstore.py`): `VectorStore` interface (`upsert/query/get/delete`) +
-  `make_store` factory. `BruteForceStore` (default, **verified**); `SqliteVecStore`,
-  `QdrantStore` written but **untested here** — verify against installed versions.
-  Progression: brute-force → sqlite-vec (true swap, same file) → qdrant (separate service, dual-store).
+- **Core** (`core/finder.py`): SQLite job queue with durable rehydrate, parser
+  (**PDF via pypdf, Word via python-docx, PowerPoint via python-pptx, text/markdown**; Office
+  formats need the `office` extra and degrade gracefully without it), staged metadata pass
+  (instant, FTS) + embed pass (full text + vectors), hybrid search (FTS5 BM25 + dense, fused by
+  RRF). `doc_id` = canonical identity. **Images (.png) skipped by choice** (no text to embed).
+- **Vector seam** (`core/vectorstore.py`): `VectorStore` interface + `make_store` factory.
+  `BruteForceStore` (default, **verified**); `SqliteVecStore`, `QdrantStore` written but
+  **untested here** — verify against installed versions. Progression: brute-force → sqlite-vec
+  (true swap, same file) → qdrant (separate service, dual-store).
 - **Embedder**: `HashingEmbedder` default (lexical stand-in, dependency-free); `STEmbedder`
   (bge-small via sentence-transformers) selectable by `PAPERFINDER_EMBEDDER=st` — untested here.
 - **Query API** (`api.py`): `/search`, `/document/{id}`, `/graph` for Cortex.
-- **CLI** (`cli.py`): `sample | backfill | poll | search | viz | serve`. Env: `PAPERFINDER_DB`,
-  `PAPERFINDER_EMBEDDER`, `PAPERFINDER_VECTOR_STORE`.
-- **Relationship layer v0** (`relationship_graph.py`, `demo.py`): provenance-bearing edges
+- **CLI** (`cli.py`): `sample | backfill | poll | search | viz | serve`. Reads `.env`
+  (python-dotenv). Env: `PAPERFINDER_DB`, `PAPERFINDER_REL_DB`, `PAPERFINDER_EMBEDDER`,
+  `PAPERFINDER_VECTOR_STORE`.
+- **Relationship layer** (`graph/relationship.py`, `graph/viz.py`): provenance-bearing edges
   (human/inferred × candidate/authenticated/rejected), candidate generation from embeddings,
   read-only graph viz. Plugs into the finder's index by shared `doc_id`; verified to survive re-embed.
 
 Verified properties: backfill indexes a folder in one pass; just-dropped docs findable from the
 metadata pass before embedding; relevant ranked above noise; results carry canonical id + link;
 the staged gap (generic first page, on-topic body) closes after the embed pass; identities and
-human-verified edges survive a full re-embed.
+human-verified edges survive a full re-embed; `.docx`/`.pptx` extracted and searchable; the live
+Drive crawl follows a real shortcut and indexes the target folder's documents in place.
 
-Wire-up steps (not yet done): Google Drive OAuth into `GoogleDriveSource`; swap `STEmbedder`
-in for real recall; benchmark before deciding on sqlite-vec/Qdrant.
+Remaining wire-up (not yet done): swap `STEmbedder` in for real semantic recall before indexing
+the full corpus; benchmark before deciding on sqlite-vec/Qdrant. Optional later: OCR or a vision
+caption for images; native Google Docs export.
 
 ---
 

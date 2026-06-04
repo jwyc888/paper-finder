@@ -39,6 +39,10 @@ def _kind_for(name: str) -> str:
         return "pdf"
     if n.endswith((".txt", ".md", ".markdown")):
         return "text"
+    if n.endswith(".docx"):
+        return "docx"
+    if n.endswith(".pptx"):
+        return "pptx"
     if n.endswith((".url", ".webloc")):
         return "url"
     return "other"
@@ -106,9 +110,16 @@ class GoogleDriveSource:
     UNTESTED in this build — verify against your Drive.
     """
 
-    DOC_MIMES = ("application/pdf", "text/plain", "text/markdown")
+    DOC_MIMES = (
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   # .docx
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+    )
     FOLDER_MIME = "application/vnd.google-apps.folder"
     SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+    OSX_ALIAS_MIME = "application/drive-fs.osx.alias"
 
     def __init__(self, drive_service, folder_ids, mime_types=None):
         self.svc = drive_service
@@ -179,6 +190,12 @@ class GoogleDriveSource:
                         queue.append(tid)
                     elif tmt in self.mimes:              # alias to a paper -> index target
                         add_doc(self._get_file(tid))
+                elif mt == self.OSX_ALIAS_MIME:
+                    import sys
+                    print(f"  [skip] macOS alias {f.get('name')!r} can't be followed via the "
+                          f"Drive API — replace it with a Drive shortcut "
+                          f"(in Drive: right-click the folder -> Organize -> Add shortcut).",
+                          file=sys.stderr)
                 elif mt in self.mimes:
                     add_doc(f)
         return refs
