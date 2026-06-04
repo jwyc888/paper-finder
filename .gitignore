@@ -19,6 +19,7 @@ my_inbox/
 .env
 credentials.json
 token.json
+service_account.json
 
 # OS / editor
 .DS_Store
