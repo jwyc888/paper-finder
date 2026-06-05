@@ -95,7 +95,7 @@ def main() -> int:
     rg = RelationshipGraph(REL_DB)
     for d in pf.all_documents():
         rg.add_document(d["doc_id"], d["title"], json.loads(d["descriptors"] or "[]"),
-                        pf.store.get(d["doc_id"]) or [], source_url=d["source_url"])
+                        pf.doc_vector(d["doc_id"]) or [], source_url=d["source_url"])
     rg.propose_candidates(pf.search(Q, k=1)[0]["doc_id"], k=4)
     build_viz(rg.export_graph(include_candidates=True), HTML,
               title="Paper relationships (from Tier A index)")

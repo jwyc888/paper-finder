@@ -136,6 +136,44 @@ def _doi(text: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def _chunk_text(text: str, size: int = 350, overlap: int = 50) -> list[str]:
+    """Split text into overlapping ~`size`-word passages. Word-based (not token-
+    based) so it's tokenizer-agnostic; ~350 words stays comfortably under a 512-token
+    model limit. Overlap keeps ideas that straddle a boundary findable in both."""
+    words = (text or "").split()
+    if not words:
+        return []
+    if len(words) <= size:
+        return [" ".join(words)]
+    step = max(1, size - overlap)
+    chunks = []
+    for start in range(0, len(words), step):
+        window = words[start:start + size]
+        if not window:
+            break
+        chunks.append(" ".join(window))
+        if start + size >= len(words):
+            break
+    return chunks
+
+
+def _snippet(text: str, terms: list[str], width: int = 300) -> str:
+    """A passage preview centred on the first matching query term, so the evidence
+    shows *why* the chunk matched rather than just its opening words. Falls back to
+    the head when there's no lexical hit (e.g. a purely semantic match)."""
+    low = (text or "").lower()
+    pos = -1
+    for t in terms:
+        i = low.find(t)
+        if i != -1 and (pos == -1 or i < pos):
+            pos = i
+    if pos == -1:
+        return text[:width] + ("…" if len(text) > width else "")
+    start = max(0, pos - width // 3)
+    end = min(len(text), start + width)
+    return ("…" if start > 0 else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
 # --------------------------------------------------------------------------- #
 # Embedding (pluggable; default is dependency-free)
 # --------------------------------------------------------------------------- #
@@ -209,6 +247,11 @@ class PaperFinder:
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
                 USING fts5(doc_id UNINDEXED, content);
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id TEXT PRIMARY KEY,
+                doc_id TEXT, ordinal INTEGER, text TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_id TEXT, ref TEXT, stage TEXT, status TEXT, created_at REAL
@@ -296,7 +339,7 @@ class PaperFinder:
                 continue
             self.conn.execute("UPDATE documents SET archived=1 WHERE doc_id=?", (d["doc_id"],))
             self.conn.execute("DELETE FROM docs_fts WHERE doc_id=?", (d["doc_id"],))
-            self.store.delete(d["doc_id"])
+            self._delete_chunks(d["doc_id"])
             archived += 1
         self.conn.commit()
         return archived
@@ -360,31 +403,96 @@ class PaperFinder:
             data = ref.fetch()
             full = Parser.full(ref, data)
             doc = self.get_document(ref.doc_id)
-            text_for_vec = f"{doc['title']}\n{full or doc['first_text']}"
-            emb = self.embedder.embed(text_for_vec)
+            base = full or doc["first_text"] or ""
+            passages = _chunk_text(f"{doc['title']}\n{base}") or [doc["title"] or ref.name]
             now = time.time()
-            self.store.upsert(ref.doc_id, emb)
+            self._delete_chunks(ref.doc_id)            # re-embed safety: replace cleanly
+            for i, passage in enumerate(passages):
+                cid = f"{ref.doc_id}#{i}"
+                self.store.upsert(cid, self.embedder.embed(passage))
+                self.conn.execute(
+                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
+                    (cid, ref.doc_id, i, passage))
             self.conn.execute(
                 """UPDATE documents SET full_text=?, embedding_model=?, embedded_at=?
                    WHERE doc_id=?""",
                 (full, self.embedder.model_name, now, ref.doc_id))
             # widen keyword reach to the full text now that we have it
-            self._fts_set(ref.doc_id, f"{doc['title']}\n{full or doc['first_text']}")
+            self._fts_set(ref.doc_id, f"{doc['title']}\n{base}")
             self.conn.execute("UPDATE jobs SET status='done' WHERE job_id=?", (job["job_id"],))
             done += 1
         self.conn.commit()
         return done
 
     def reembed_all(self, embedder) -> None:
-        """Re-embed every document with a new model. Identity + FTS keys are
-        unchanged, so nothing downstream (relationships) is disturbed."""
+        """Re-embed every document with a new model, re-chunking from full text.
+        Identity + FTS keys are unchanged, so nothing downstream (relationships) is
+        disturbed. Note: a model with a different vector dimension needs a fresh
+        store (brute-force tolerates it; sqlite-vec/Qdrant fix dim at creation)."""
         self.embedder = embedder
         for d in self.all_documents():
-            text = f"{d['title']}\n{d['full_text'] or d['first_text']}"
-            self.store.upsert(d["doc_id"], embedder.embed(text))
+            base = d["full_text"] or d["first_text"] or ""
+            passages = _chunk_text(f"{d['title']}\n{base}") or [d["title"] or ""]
+            self._delete_chunks(d["doc_id"])
+            for i, passage in enumerate(passages):
+                cid = f"{d['doc_id']}#{i}"
+                self.store.upsert(cid, embedder.embed(passage))
+                self.conn.execute(
+                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
+                    (cid, d["doc_id"], i, passage))
             self.conn.execute(
                 "UPDATE documents SET embedding_model=?, embedded_at=? WHERE doc_id=?",
                 (embedder.model_name, time.time(), d["doc_id"]))
+        self.conn.commit()
+
+    # ---- chunk helpers ---------------------------------------------------
+    def _delete_chunks(self, doc_id: str) -> None:
+        for r in self.conn.execute("SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)):
+            self.store.delete(r["chunk_id"])
+        self.conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+
+    def doc_vector(self, doc_id: str) -> Optional[list[float]]:
+        """Centroid of a document's chunk vectors — a single-vector view of a doc
+        for callers (e.g. the relationship layer) that still want one per document."""
+        vecs = []
+        for r in self.conn.execute("SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)):
+            v = self.store.get(r["chunk_id"])
+            if v:
+                vecs.append(v)
+        if not vecs:
+            return None
+        dim = len(vecs[0])
+        cent = [sum(v[i] for v in vecs) / len(vecs) for i in range(dim)]
+        n = math.sqrt(sum(x * x for x in cent))
+        return [x / n for x in cent] if n else cent
+
+    def add_document_text(self, doc_id: str, title: str, text: str,
+                          source_url: str = "", doi: Optional[str] = None,
+                          kind: str = "text") -> None:
+        """Index a document directly from in-memory text (metadata + chunked embed
+        in one call). Convenience for programmatic ingestion and tests."""
+        now = time.time()
+        self.conn.execute(
+            """INSERT INTO documents
+               (doc_id,title,source_url,kind,doi,descriptors,first_text,full_text,
+                embedding_model,modified,indexed_at,embedded_at,archived)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
+               ON CONFLICT(doc_id) DO UPDATE SET
+                 title=excluded.title, source_url=excluded.source_url, kind=excluded.kind,
+                 doi=excluded.doi, first_text=excluded.first_text, full_text=excluded.full_text,
+                 embedding_model=excluded.embedding_model, indexed_at=excluded.indexed_at,
+                 embedded_at=excluded.embedded_at, archived=0""",
+            (doc_id, title, source_url, kind, doi, json.dumps([]),
+             text[:2000], text, self.embedder.model_name, now, now, now))
+        self._fts_set(doc_id, f"{title}\n{text}")
+        passages = _chunk_text(f"{title}\n{text}") or [title or doc_id]
+        self._delete_chunks(doc_id)
+        for i, passage in enumerate(passages):
+            cid = f"{doc_id}#{i}"
+            self.store.upsert(cid, self.embedder.embed(passage))
+            self.conn.execute(
+                "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
+                (cid, doc_id, i, passage))
         self.conn.commit()
 
     # ---- fts helper ------------------------------------------------------
@@ -416,9 +524,19 @@ class PaperFinder:
             except sqlite3.OperationalError:
                 pass
 
-        # dense ranker (delegated to the pluggable vector store)
+        # dense ranker: nearest CHUNKS, pooled up to their documents (best passage wins)
         qv = self.embedder.embed(query)
-        dense_rank = {doc_id: i for i, (doc_id, _) in enumerate(self.store.query(qv, 50))}
+        doc_best: dict[str, tuple[float, str]] = {}   # doc_id -> (best score, chunk_id)
+        for cid, score in self.store.query(qv, 50):
+            row = self.conn.execute(
+                "SELECT doc_id FROM chunks WHERE chunk_id=?", (cid,)).fetchone()
+            if not row:
+                continue
+            did = row["doc_id"]
+            if did not in doc_best or score > doc_best[did][0]:
+                doc_best[did] = (score, cid)
+        dense_sorted = sorted(doc_best.items(), key=lambda x: x[1][0], reverse=True)
+        dense_rank = {did: i for i, (did, _) in enumerate(dense_sorted)}
 
         # reciprocal-rank fusion
         fused: dict[str, float] = {}
@@ -431,12 +549,19 @@ class PaperFinder:
             d = self.get_document(doc_id)
             if not d or d["archived"]:
                 continue
+            passage = None
+            if doc_id in doc_best:
+                pr = self.conn.execute(
+                    "SELECT text FROM chunks WHERE chunk_id=?", (doc_best[doc_id][1],)).fetchone()
+                if pr and pr["text"]:
+                    passage = _snippet(pr["text"], terms)
             out.append({
                 "doc_id": doc_id,                     # canonical identity
                 "title": d["title"],
                 "source_url": d["source_url"],        # the link a human re-opens
                 "doi": d["doi"],
                 "embedded": d["embedding_model"] is not None,
+                "passage": passage,                   # the matching passage (the "why")
                 "score": round(score, 5),
             })
             if len(out) >= k:
