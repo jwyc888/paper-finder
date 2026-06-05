@@ -35,6 +35,21 @@ def drive_service():
     return build("drive", "v3", credentials=creds)
 
 
+def _qdrant_problem():
+    """If the vector store is Qdrant, return an error string when it's unreachable,
+    else None. Keeps the nightly log readable instead of dumping a stack trace."""
+    if os.environ.get("PAPERFINDER_VECTOR_STORE", "bruteforce") != "qdrant":
+        return None
+    url = os.environ.get("PAPERFINDER_QDRANT_URL", "http://localhost:6533")
+    try:
+        from qdrant_client import QdrantClient
+        QdrantClient(url=url, timeout=5).get_collections()
+        return None
+    except Exception as e:
+        return (f"Qdrant not reachable at {url} ({e}); "
+                f"is the container up?  docker start paperfinder-qdrant")
+
+
 def main() -> int:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -52,6 +67,11 @@ def main() -> int:
     if not ids:
         print(f"[{stamp}] nothing to sync (no folders resolved)", flush=True)
         return 1
+
+    problem = _qdrant_problem()
+    if problem:
+        print(f"[{stamp}] QDRANT NOT READY: {problem}", flush=True)
+        return 4
 
     try:
         pf = open_finder()
