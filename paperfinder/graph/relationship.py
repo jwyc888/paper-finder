@@ -294,7 +294,8 @@ class RelationshipGraph:
     def export_graph(self, include_candidates: bool = True) -> dict:
         statuses = ("authenticated", "candidate") if include_candidates else ("authenticated",)
         nodes = [
-            {"id": d["doc_id"], "title": d["title"], "descriptors": d["descriptors"]}
+            {"id": d["doc_id"], "title": d["title"], "descriptors": d["descriptors"],
+             "source_url": d["source_url"]}
             for d in self.all_documents()
         ]
         edges = []
