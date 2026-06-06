@@ -69,9 +69,11 @@ def test_alias_following():
     files = {
         "root":   {"id": "root", "name": "Index", "mimeType": FOLDER, "parents": []},
         "subA":   {"id": "subA", "name": "ProjectA", "mimeType": FOLDER, "parents": ["root"]},
+        "subA2":  {"id": "subA2", "name": "Deep", "mimeType": FOLDER, "parents": ["subA"]},
         "extF":   {"id": "extF", "name": "SharedLit", "mimeType": FOLDER, "parents": ["zzz"]},
         "ignore": {"id": "ignore", "name": "Other", "mimeType": FOLDER, "parents": ["zzz"]},
-        "a1": _doc("a1", "a1.txt", ["subA"], body),         # physically under root
+        "a1": _doc("a1", "a1.txt", ["subA"], body),         # physically under root/ProjectA
+        "a2": _doc("a2", "a2.txt", ["subA2"], body),        # under root/ProjectA/Deep
         "e1": _doc("e1", "e1.txt", ["extF"], body),         # reached via folder alias
         "x1": _doc("x1", "x1.txt", ["other"], body),        # reached via file alias
         "n1": _doc("n1", "n1.txt", ["ignore"], body),       # NOT reachable -> ignored
@@ -83,6 +85,7 @@ def test_alias_following():
     src = GoogleDriveSource(MockDriveService(files), folder_ids=["root"])
     refs = src.crawl()
     ids = {r.doc_id for r in refs}
+    tag = {r.doc_id: r.tag for r in refs}
 
     checks = [
         ("physical file under root indexed", "gdrive:a1" in ids),
@@ -91,6 +94,10 @@ def test_alias_following():
         ("unreachable folder ignored", "gdrive:n1" not in ids),
         ("alias target folder added to scope", "extF" in src._scope),
         ("no duplicates", len(refs) == len(ids)),
+        ("folder tag is full path from root", tag.get("gdrive:a1") == "ProjectA"),
+        ("nested folder tag is full path", tag.get("gdrive:a2") == "ProjectA/Deep"),
+        ("folder-alias tag uses the tree name", tag.get("gdrive:e1") == "->SharedLit"),
+        ("root-level file-alias tag is empty", tag.get("gdrive:x1") == ""),
     ]
 
     # and the whole pipeline runs on the mock Drive
@@ -103,7 +110,13 @@ def test_alias_following():
     pf.run_embed_pass()
     hits = {h["doc_id"] for h in pf.search("patient sentiment chatbots", k=10)}
     checks.append(("pipeline indexes aliased docs end-to-end",
-                   {"gdrive:a1", "gdrive:e1", "gdrive:x1"} <= hits and "gdrive:n1" not in hits))
+                   {"gdrive:a1", "gdrive:a2", "gdrive:e1", "gdrive:x1"} <= hits and "gdrive:n1" not in hits))
+    checks.append(("folder persisted on the document row",
+                   pf.get_document("gdrive:a1")["folder"] == "ProjectA"))
+    scoped = {h["doc_id"] for h in pf.search("patient sentiment chatbots", k=10, folder="ProjectA")}
+    checks.append(("folder filter is prefix-aware",
+                   {"gdrive:a1", "gdrive:a2"} <= scoped
+                   and "gdrive:e1" not in scoped and "gdrive:x1" not in scoped))
     return checks
 
 

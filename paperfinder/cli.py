@@ -70,6 +70,8 @@ def search(query: str, k: int = 8):
         flag = "" if r["embedded"] else "  (metadata-only)"
         print(f"{i:>2}. {r['title']}{flag}")
         print(f"    {r['source_url']}")
+        if r.get("folder"):
+            print(f"    folder: {r['folder']}")
         print(f"    id={r['doc_id']}  score={r['score']}")
 
 

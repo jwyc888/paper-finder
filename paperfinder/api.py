@@ -21,8 +21,8 @@ _pf = PaperFinder(os.environ.get("PAPERFINDER_DB", "paperfinder.db"))
 
 
 @app.get("/search")
-def search(q: str, k: int = 5):
-    return {"query": q, "results": _pf.search(q, k=k)}
+def search(q: str, k: int = 5, folder: str = None):
+    return {"query": q, "results": _pf.search(q, k=k, folder=folder)}
 
 
 @app.get("/document/{doc_id}")

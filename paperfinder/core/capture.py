@@ -31,6 +31,7 @@ class DocumentRef:
     modified: float                  # epoch seconds
     source_url: str                  # where a human re-opens it
     fetch: Callable[[], bytes]       # pull raw bytes on demand
+    tag: str = ""                    # full folder path from the source root ("" = root level)
 
 
 def _kind_for(name: str) -> str:
@@ -127,7 +128,7 @@ class GoogleDriveSource:
         self.mimes = set(mime_types or self.DOC_MIMES)
         self._scope = set(self.roots)
 
-    def _ref(self, f) -> DocumentRef:
+    def _ref(self, f, tag: str = "") -> DocumentRef:
         fid = f["id"]
 
         def _fetch(file_id=fid) -> bytes:
@@ -136,7 +137,7 @@ class GoogleDriveSource:
         return DocumentRef(
             doc_id="gdrive:" + fid, name=f.get("name", fid),
             kind=_kind_for(f.get("name", "")), modified=0.0,
-            source_url=f.get("webViewLink", ""), fetch=_fetch)
+            source_url=f.get("webViewLink", ""), fetch=_fetch, tag=tag)
 
     def _children(self, folder_id) -> list[dict]:
         files, page = [], None
@@ -161,17 +162,20 @@ class GoogleDriveSource:
         to the TARGET id, so a paper reached via an alias and a physical copy under
         the root collapse to one node."""
         refs, seen_folders, seen_docs = [], set(), set()
-        queue = list(self.roots)
+        queue = [(r, "") for r in self.roots]   # (folder_id, path from the source root)
         self._scope = set(self.roots)
 
-        def add_doc(meta):
+        def sub(path, name):                     # extend the path with a child folder name
+            return name if not path else path + "/" + name
+
+        def add_doc(meta, tag):
             if meta["id"] in seen_docs:
                 return
             seen_docs.add(meta["id"])
-            refs.append(self._ref(meta))
+            refs.append(self._ref(meta, tag))
 
         while queue:
-            fid = queue.pop()
+            fid, path = queue.pop()
             if fid in seen_folders:
                 continue
             seen_folders.add(fid)
@@ -179,7 +183,7 @@ class GoogleDriveSource:
                 mt = f["mimeType"]
                 if mt == self.FOLDER_MIME:
                     self._scope.add(f["id"])
-                    queue.append(f["id"])
+                    queue.append((f["id"], sub(path, f.get("name", ""))))
                 elif mt == self.SHORTCUT_MIME:
                     sd = f.get("shortcutDetails") or {}
                     tid, tmt = sd.get("targetId"), sd.get("targetMimeType")
@@ -187,9 +191,9 @@ class GoogleDriveSource:
                         continue
                     if tmt == self.FOLDER_MIME:          # alias to a folder -> follow it
                         self._scope.add(tid)
-                        queue.append(tid)
+                        queue.append((tid, sub(path, f.get("name", ""))))
                     elif tmt in self.mimes:              # alias to a paper -> index target
-                        add_doc(self._get_file(tid))
+                        add_doc(self._get_file(tid), path)
                 elif mt == self.OSX_ALIAS_MIME:
                     import sys
                     print(f"  [skip] macOS alias {f.get('name')!r} can't be followed via the "
@@ -197,7 +201,7 @@ class GoogleDriveSource:
                           f"(in Drive: right-click the folder -> Organize -> Add shortcut).",
                           file=sys.stderr)
                 elif mt in self.mimes:
-                    add_doc(f)
+                    add_doc(f, path)
         return refs
 
     def start_checkpoint(self) -> str:

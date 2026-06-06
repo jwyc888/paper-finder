@@ -250,6 +250,7 @@ class PaperFinder:
                 first_text TEXT, full_text TEXT,
                 embedding_model TEXT,
                 modified REAL, indexed_at REAL, embedded_at REAL,
+                folder TEXT,                      -- full path from the source root ("" = root)
                 archived INTEGER DEFAULT 0
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
@@ -267,10 +268,14 @@ class PaperFinder:
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(stage, status);
             """
         )
-        try:  # migrate pre-existing DBs
-            self.conn.execute("ALTER TABLE documents ADD COLUMN archived INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+        for ddl in (  # migrate pre-existing DBs (each is a no-op once the column exists)
+            "ALTER TABLE documents ADD COLUMN archived INTEGER DEFAULT 0",
+            "ALTER TABLE documents ADD COLUMN folder TEXT",
+        ):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     # ---- checkpoint ------------------------------------------------------
@@ -383,15 +388,16 @@ class PaperFinder:
             now = time.time()
             self.conn.execute(
                 """INSERT INTO documents
-                   (doc_id,title,source_url,kind,doi,descriptors,first_text,modified,indexed_at,archived)
-                   VALUES(?,?,?,?,?,?,?,?,?,0)
+                   (doc_id,title,source_url,kind,doi,descriptors,first_text,folder,modified,indexed_at,archived)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,0)
                    ON CONFLICT(doc_id) DO UPDATE SET
                      title=excluded.title, source_url=excluded.source_url,
                      kind=excluded.kind, doi=excluded.doi,
-                     first_text=excluded.first_text, indexed_at=excluded.indexed_at,
+                     first_text=excluded.first_text, folder=excluded.folder,
+                     indexed_at=excluded.indexed_at,
                      archived=0""",
                 (ref.doc_id, m["title"], ref.source_url, m["kind"], m["doi"],
-                 json.dumps([]), m["first_text"], ref.modified, now))
+                 json.dumps([]), m["first_text"], getattr(ref, "tag", ""), ref.modified, now))
             self._fts_set(ref.doc_id, f"{m['title']}\n{m['first_text']}")
             self.conn.execute("UPDATE jobs SET status='done' WHERE job_id=?", (job["job_id"],))
             self.conn.execute(
@@ -583,7 +589,8 @@ class PaperFinder:
         return proposed
 
     # ---- hybrid search ---------------------------------------------------
-    def search(self, query: str, k: int = 5, rrf_k: int = 60) -> list[dict]:
+    def search(self, query: str, k: int = 5, rrf_k: int = 60,
+               folder: Optional[str] = None) -> list[dict]:
         # keyword ranker (BM25 via FTS5)
         terms = re.findall(r"[a-z0-9]+", query.lower())
         kw_rank: dict[str, int] = {}
@@ -623,6 +630,10 @@ class PaperFinder:
             d = self.get_document(doc_id)
             if not d or d["archived"]:
                 continue
+            if folder:                                # exact folder or anything beneath it
+                df = d.get("folder") or ""
+                if df != folder and not df.startswith(folder + "/"):
+                    continue
             passage = None
             if doc_id in doc_best:
                 pr = self.conn.execute(
@@ -633,6 +644,7 @@ class PaperFinder:
                 "doc_id": doc_id,                     # canonical identity
                 "title": d["title"],
                 "source_url": d["source_url"],        # the link a human re-opens
+                "folder": d.get("folder") or "",      # full path from the source root
                 "doi": d["doi"],
                 "embedded": d["embedding_model"] is not None,
                 "passage": passage,                   # the matching passage (the "why")
