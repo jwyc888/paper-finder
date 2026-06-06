@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  paper-finder daily LaunchAgent (TEMPLATE).
+
+  Runs examples/daily_run.py at login and every 3 hours; the once-per-day marker
+  in ~/.paperfinder/last_run keeps it to a single real run per day. daily_run.py
+  loads .env itself, so this plist does not need your PAPERFINDER_* config.
+
+  To use: replace the three REPLACE_ME tokens with absolute paths, then install:
+
+    cp examples/com.bioratio.paperfinder.daily.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bioratio.paperfinder.daily.plist
+    launchctl kickstart -k gui/$(id -u)/com.bioratio.paperfinder.daily
+
+  (install_automation.sh generates this same file with the paths already filled in.)
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.bioratio.paperfinder.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_ME_VENV_PYTHON</string>
+    <string>REPLACE_ME_REPO/examples/daily_run.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>REPLACE_ME_REPO</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>10800</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>REPLACE_ME_HOME/Library/Logs/paperfinder-daily.log</string>
+  <key>StandardErrorPath</key><string>REPLACE_ME_HOME/Library/Logs/paperfinder-daily.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
