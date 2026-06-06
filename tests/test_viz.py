@@ -18,6 +18,7 @@ GRAPH = {
          "folder": "Aging/Telomeres",
          "source_url": "https://drive.google.com/file/d/1ABC/view"},
         {"id": "gdrive:2DEF", "title": "Senescence paper", "descriptors": [],
+         "folder": "Senescence/Cellular",
          "source_url": "https://drive.google.com/file/d/2DEF/view"},
     ],
     "edges": [
@@ -52,6 +53,12 @@ def main() -> int:
                    "Aging/Telomeres" in static_html))
     checks.append(("static: top-level-folder label logic present",
                    "topFolder" in static_html))
+    checks.append(("static: color-by-folder + folder legend present",
+                   "colorFor" in static_html and 'id="folderlegend"' in static_html))
+    checks.append(("static: cross-folder emphasis toggle present",
+                   'id="emph"' in static_html))
+    checks.append(("static: cross-folder edge logic present",
+                   "_cross" in static_html and "emphColor" in static_html))
     checks.append(("static: no review controls (panel/buttons absent, flag off)",
                    'id="rv-auth"' not in static_html and 'id="done"' not in static_html
                    and "INTERACTIVE = false" in static_html))

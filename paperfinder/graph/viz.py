@@ -27,6 +27,8 @@ _TEMPLATE = """<!DOCTYPE html>
   .swatch{display:inline-block;width:30px;height:0;vertical-align:middle;margin-right:7px}
   .s-auth{border-top:3px solid var(--teal)}
   .s-cand{border-top:2px dashed var(--amber)}
+  .s-cross{border-top:3px solid #d6336c}
+  .dot{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:middle;margin-right:7px;border:1px solid rgba(0,0,0,.15)}
   .controls{display:flex;gap:14px;align-items:center;padding:12px 32px;font-size:14px;color:var(--muted);border-bottom:1px solid var(--line)}
   .controls label{color:var(--ink)}
   #thr{width:280px;accent-color:var(--teal)}
@@ -54,11 +56,14 @@ _TEMPLATE = """<!DOCTYPE html>
   <div class="legend">
     <span><span class="swatch s-auth"></span><b>Authenticated</b>: verified by a human</span>
     <span><span class="swatch s-cand"></span><b>Candidate</b>: inferred from shared passages</span>
+    <span><span class="swatch s-cross"></span><b>Cross-folder</b>: links two different folders</span>
   </div>
+  <div class="legend" id="folderlegend"></div>
   <div class="controls">
     <label for="thr">Min score</label>
     <input id="thr" type="range">
     <span id="thrval" class="val"></span>
+    <label class="emphlbl"><input id="emph" type="checkbox" checked> Emphasize cross-folder links</label>
     <span id="cnt" class="cnt"></span>
     __DONE__
   </div>
@@ -75,7 +80,17 @@ _TEMPLATE = """<!DOCTYPE html>
   const nodeUrl = n => n.source_url || (String(n.id).startsWith("gdrive:")
         ? "https://drive.google.com/file/d/" + String(n.id).slice(7) + "/view" : "");
   const topFolder = n => { const f = (n.folder || ""); return f ? f.split("/")[0] : ""; };
+  const PALETTE = ["#0f6e56","#a06414","#3b6ea5","#8a5a2b","#6b7e3a","#2f7d7d","#9a3b6e","#5b6770"];
+  const ROOTCOLOR = "#b8b2a7";
+  const topFolders = [...new Set(G.nodes.map(topFolder).filter(Boolean))].sort();
+  const folderColor = {}; topFolders.forEach((f, i) => folderColor[f] = PALETTE[i % PALETTE.length]);
+  const colorFor = n => { const t = topFolder(n); return t ? folderColor[t] : ROOTCOLOR; };
+  const topById = {}; G.nodes.forEach(n => topById[n.id] = topFolder(n));
   const titleById = {}; G.nodes.forEach(n => titleById[n.id] = n.title);
+  (function(){ const fl = document.getElementById("folderlegend"); if (!fl) return;
+    let h = topFolders.map(f => "<span><span class='dot' style='background:" + folderColor[f] + "'></span>" + esc(f) + "</span>").join("");
+    if (G.nodes.some(n => !topFolder(n))) h += "<span><span class='dot' style='background:" + ROOTCOLOR + "'></span>(root)</span>";
+    fl.innerHTML = h; })();
 
   const nodes = new vis.DataSet(G.nodes.map(n => ({
     id: n.id,
@@ -86,9 +101,21 @@ _TEMPLATE = """<!DOCTYPE html>
     url: nodeUrl(n),
     shape: "dot", size: 13,
     widthConstraint: { maximum: 170 },
-    color: { background: "#fffdf8", border: teal, highlight: { background: "#eaf5f0", border: teal } },
+    color: { background: colorFor(n), border: ink, highlight: { background: colorFor(n), border: amber } },
     font: { face: "Newsreader", size: 15, color: ink, multi: false }
   })));
+
+  let emphasizeCross = true;
+  const emphColor = "#d6336c";
+  const edgeStyle = ed => {
+    const auth = ed._status === "authenticated";
+    const cross = emphasizeCross && ed._cross;
+    return {
+      color: { color: cross ? emphColor : (auth ? teal : amber), opacity: cross ? 0.95 : (auth ? 0.95 : 0.5) },
+      width: cross ? (auth ? 3.5 : 2.6) : (auth ? 3 : 1.4),
+      dashes: auth ? false : [5,5]
+    };
+  };
 
   const allEdges = new vis.DataSet(G.edges.map((e, i) => {
     const auth = e.status === "authenticated";
@@ -102,13 +129,18 @@ _TEMPLATE = """<!DOCTYPE html>
     if (ev.src_passage) h += "<br><br>" + esc(trim(ev.src_passage));
     if (ev.dst_passage) h += "<br><br>" + esc(trim(ev.dst_passage));
     el.innerHTML = h;
-    return {
+    const sg = topById[e.src] || "", dg = topById[e.dst] || "";
+    const base = {
       id: i, from: e.src, to: e.dst, _src: e.src, _dst: e.dst, _status: e.status,
       _score: (e.confidence == null ? null : e.confidence),
-      color: { color: auth ? teal : amber, opacity: auth ? 0.95 : 0.5 },
-      width: auth ? 3 : 1.4, dashes: auth ? false : [5,5], title: el
+      _cross: !!(sg && dg && sg !== dg), title: el
     };
+    return Object.assign(base, edgeStyle(base));
   }));
+
+  const restyle = () => allEdges.update(allEdges.get().map(ed => Object.assign({ id: ed.id }, edgeStyle(ed))));
+  const emphBox = document.getElementById("emph");
+  if (emphBox) emphBox.addEventListener("change", () => { emphasizeCross = emphBox.checked; restyle(); });
 
   const scores = G.edges.filter(e => e.confidence != null).map(e => e.confidence);
   const lo = scores.length ? Math.floor(Math.min(...scores) * 100) / 100 : 0;
@@ -165,8 +197,8 @@ _TEMPLATE = """<!DOCTYPE html>
     document.getElementById("rv-auth").onclick = async () => {
       const ed = allEdges.get(selectedEdge); if (!ed) return;
       if (await post("/authenticate", { src: ed._src, dst: ed._dst })) {
-        allEdges.update({ id: selectedEdge, _score: null, _status: "authenticated",
-          color: { color: teal, opacity: 0.95 }, width: 3, dashes: false });
+        allEdges.update({ id: selectedEdge, _score: null, _status: "authenticated" });
+        restyle();
         refresh(); document.getElementById("rv-msg").textContent = "Authenticated.";
       } else document.getElementById("rv-msg").textContent = "Failed to reach server.";
     };

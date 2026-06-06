@@ -165,10 +165,40 @@ def test_reconcile_preserves_edges():
     ]
 
 
+def test_folder_rename_updates():
+    body = "patient sentiment toward AI chatbots in clinical care"
+    files = {
+        "root": {"id": "root", "name": "Index", "mimeType": FOLDER, "parents": []},
+        "sub":  {"id": "sub", "name": "OldName", "mimeType": FOLDER, "parents": ["root"]},
+        "d1": _doc("d1", "d1.txt", ["sub"], body),
+    }
+    src = GoogleDriveSource(MockDriveService(files), folder_ids=["root"])
+    db = "test_rename.db"
+    if os.path.exists(db):
+        os.remove(db)
+    pf = PaperFinder(db, embedder=HashingEmbedder())
+    pf.run_backfill(src, source_key="gdrive", reconcile=True)
+    pf.run_metadata_pass()
+    pf.run_embed_pass()
+    before = pf.get_document("gdrive:d1")["folder"]
+
+    files["sub"]["name"] = "NewName"            # rename the folder on the "Drive"
+    pf.run_backfill(src, source_key="gdrive", reconcile=True)
+    pf.run_metadata_pass()
+    after = pf.get_document("gdrive:d1")["folder"]
+
+    return [
+        ("tag captured on first index", before == "OldName"),
+        ("tag refreshes after a folder rename", after == "NewName"),
+    ]
+
+
 def main():
     all_checks = []
     print("=== alias following (mock Drive) ===")
     all_checks += test_alias_following()
+    print("=== folder rename ===")
+    all_checks += test_folder_rename_updates()
     print("=== reconcile / prune ===")
     all_checks += test_reconcile_preserves_edges()
 

@@ -326,7 +326,11 @@ class PaperFinder:
             reachable.add(ref.doc_id)
             existing = self.get_document(ref.doc_id)
             if existing and not existing["archived"]:
-                continue                                       # already in scope; poll handles edits
+                new_tag = getattr(ref, "tag", "") or ""
+                if (existing["folder"] or "") != new_tag:     # folder renamed, or doc moved
+                    self.conn.execute("UPDATE documents SET folder=? WHERE doc_id=?",
+                                      (new_tag, ref.doc_id))
+                continue                                       # already in scope; poll handles content edits
             self.conn.execute(
                 "INSERT INTO jobs(doc_id,ref,stage,status,created_at) VALUES(?,?,?,?,?)",
                 (ref.doc_id, _ref_json(ref), "metadata", "pending", time.time()))
