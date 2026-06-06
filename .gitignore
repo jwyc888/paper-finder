@@ -25,3 +25,7 @@ service_account.json
 .DS_Store
 .idea/
 .vscode/
+
+# generated artifacts / scaffolding
+paper_graph.html
+install_*.sh
