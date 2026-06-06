@@ -30,7 +30,7 @@ def main() -> int:
 
     pf = PaperFinder(DB, embedder=HashingEmbedder())
     pf.add_document_text("A", "Immunology paper", IMMUNO + " " + SHARED,
-                         source_url="file:///tmp/A.txt")
+                         source_url="file:///tmp/A.txt", folder="Immunology/Methods")
     pf.add_document_text("B", "Crystallography paper", CRYSTAL + " " + SHARED,
                          source_url="file:///tmp/B.txt")
     pf.add_document_text("C", "Logistics paper", LOGISTICS,
@@ -63,6 +63,9 @@ def main() -> int:
     checks.append(("A-B candidate edge exists with passage evidence",
                    ab is not None and ab["evidence"]
                    and "telomerase" in ab["evidence"]["dst_passage"].lower()))
+    node_a = next((nd for nd in g["nodes"] if nd["id"] == "A"), None)
+    checks.append(("document folder flows through to the graph node",
+                   node_a is not None and node_a.get("folder") == "Immunology/Methods"))
 
     # human verdict wins: reject A-B, re-propose, it stays rejected
     rg.reject("A", "B")

@@ -74,12 +74,15 @@ _TEMPLATE = """<!DOCTYPE html>
   const shortLabel = t => { t = (t||"").trim(); return t.length>60 ? t.slice(0,60)+"\\u2026" : t; };
   const nodeUrl = n => n.source_url || (String(n.id).startsWith("gdrive:")
         ? "https://drive.google.com/file/d/" + String(n.id).slice(7) + "/view" : "");
+  const topFolder = n => { const f = (n.folder || ""); return f ? f.split("/")[0] : ""; };
   const titleById = {}; G.nodes.forEach(n => titleById[n.id] = n.title);
 
   const nodes = new vis.DataSet(G.nodes.map(n => ({
     id: n.id,
-    label: shortLabel(n.title),
-    title: esc(n.title) + (nodeUrl(n) ? "<br><span style='color:#6f6a5f'>click to open source</span>" : ""),
+    label: (topFolder(n) ? "[" + topFolder(n) + "] " : "") + shortLabel(n.title),
+    title: esc(n.title)
+      + (n.folder ? "<br><span style='color:#6f6a5f'>" + esc(n.folder) + "</span>" : "")
+      + (nodeUrl(n) ? "<br><span style='color:#6f6a5f'>click to open source</span>" : ""),
     url: nodeUrl(n),
     shape: "dot", size: 13,
     widthConstraint: { maximum: 170 },

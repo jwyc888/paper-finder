@@ -15,6 +15,7 @@ OUT = "test_viz_output.html"
 GRAPH = {
     "nodes": [
         {"id": "gdrive:1ABC", "title": "Telomerase paper", "descriptors": [],
+         "folder": "Aging/Telomeres",
          "source_url": "https://drive.google.com/file/d/1ABC/view"},
         {"id": "gdrive:2DEF", "title": "Senescence paper", "descriptors": [],
          "source_url": "https://drive.google.com/file/d/2DEF/view"},
@@ -47,6 +48,10 @@ def main() -> int:
     checks.append(("static: score embedded", "0.812" in static_html))
     checks.append(("static: source_url for node-open embedded",
                    "drive.google.com/file/d/1ABC/view" in static_html))
+    checks.append(("static: node folder embedded in data",
+                   "Aging/Telomeres" in static_html))
+    checks.append(("static: top-level-folder label logic present",
+                   "topFolder" in static_html))
     checks.append(("static: no review controls (panel/buttons absent, flag off)",
                    'id="rv-auth"' not in static_html and 'id="done"' not in static_html
                    and "INTERACTIVE = false" in static_html))

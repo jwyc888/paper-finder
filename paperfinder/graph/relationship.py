@@ -55,6 +55,7 @@ class RelationshipGraph:
                 doc_id          TEXT PRIMARY KEY,   -- canonical identity
                 title           TEXT,
                 source_url      TEXT,
+                folder          TEXT,               -- full path from the source root ("" = root)
                 descriptors     TEXT,               -- JSON array of strings
                 embedding       TEXT,               -- JSON array of floats (regenerable)
                 embedding_model TEXT,
@@ -81,10 +82,14 @@ class RelationshipGraph:
             CREATE INDEX IF NOT EXISTS idx_edges_status ON edges (status);
             """
         )
-        try:  # migrate pre-existing DBs
-            self.conn.execute("ALTER TABLE edges ADD COLUMN evidence TEXT")
-        except sqlite3.OperationalError:
-            pass
+        for ddl in (  # migrate pre-existing DBs (each a no-op once the column exists)
+            "ALTER TABLE edges ADD COLUMN evidence TEXT",
+            "ALTER TABLE documents ADD COLUMN folder TEXT",
+        ):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     # ---- documents -------------------------------------------------------
@@ -97,21 +102,23 @@ class RelationshipGraph:
         embedding: list[float],
         source_url: Optional[str] = None,
         embedding_model: str = "v0-stub",
+        folder: str = "",
     ) -> None:
         self.conn.execute(
             """
-            INSERT INTO documents (doc_id, title, source_url, descriptors,
+            INSERT INTO documents (doc_id, title, source_url, folder, descriptors,
                                    embedding, embedding_model, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(doc_id) DO UPDATE SET
                 title=excluded.title,
                 source_url=excluded.source_url,
+                folder=excluded.folder,
                 descriptors=excluded.descriptors,
                 embedding=excluded.embedding,
                 embedding_model=excluded.embedding_model,
                 updated_at=excluded.updated_at
             """,
-            (doc_id, title, source_url, json.dumps(list(descriptors)),
+            (doc_id, title, source_url, folder, json.dumps(list(descriptors)),
              json.dumps(embedding), embedding_model, _now()),
         )
         self.conn.commit()
@@ -133,6 +140,7 @@ class RelationshipGraph:
             "doc_id": row["doc_id"],
             "title": row["title"],
             "source_url": row["source_url"],
+            "folder": (row["folder"] if "folder" in row.keys() else "") or "",
             "descriptors": json.loads(row["descriptors"] or "[]"),
             "embedding": json.loads(row["embedding"] or "[]"),
             "embedding_model": row["embedding_model"],
@@ -304,7 +312,7 @@ class RelationshipGraph:
         statuses = ("authenticated", "candidate") if include_candidates else ("authenticated",)
         nodes = [
             {"id": d["doc_id"], "title": d["title"], "descriptors": d["descriptors"],
-             "source_url": d["source_url"]}
+             "source_url": d["source_url"], "folder": d["folder"]}
             for d in self.all_documents()
         ]
         edges = []

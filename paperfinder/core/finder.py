@@ -487,7 +487,7 @@ class PaperFinder:
 
     def add_document_text(self, doc_id: str, title: str, text: str,
                           source_url: str = "", doi: Optional[str] = None,
-                          kind: str = "text") -> None:
+                          kind: str = "text", folder: str = "") -> None:
         """Index a document directly from in-memory text (metadata + chunked embed
         in one call). Convenience for programmatic ingestion and tests."""
         if self.strip_sections and text:
@@ -496,16 +496,17 @@ class PaperFinder:
         now = time.time()
         self.conn.execute(
             """INSERT INTO documents
-               (doc_id,title,source_url,kind,doi,descriptors,first_text,full_text,
+               (doc_id,title,source_url,kind,doi,descriptors,first_text,full_text,folder,
                 embedding_model,modified,indexed_at,embedded_at,archived)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)
                ON CONFLICT(doc_id) DO UPDATE SET
                  title=excluded.title, source_url=excluded.source_url, kind=excluded.kind,
                  doi=excluded.doi, first_text=excluded.first_text, full_text=excluded.full_text,
+                 folder=excluded.folder,
                  embedding_model=excluded.embedding_model, indexed_at=excluded.indexed_at,
                  embedded_at=excluded.embedded_at, archived=0""",
             (doc_id, title, source_url, kind, doi, json.dumps([]),
-             text[:2000], text, self.embedder.model_name, now, now, now))
+             text[:2000], text, folder, self.embedder.model_name, now, now, now))
         self._fts_set(doc_id, f"{title}\n{text}")
         passages = _chunk_text(f"{title}\n{text}") or [title or doc_id]
         self._delete_chunks(doc_id)
@@ -577,7 +578,8 @@ class PaperFinder:
             if d["archived"]:
                 continue
             rg.add_document(d["doc_id"], d["title"], [], self.doc_vector(d["doc_id"]) or [],
-                            source_url=d["source_url"], embedding_model=self.embedder.model_name)
+                            source_url=d["source_url"], embedding_model=self.embedder.model_name,
+                            folder=d["folder"] or "")
         for d in self.all_documents():
             if d["archived"]:
                 continue
