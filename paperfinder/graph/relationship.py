@@ -192,6 +192,15 @@ class RelationshipGraph:
         )
         self.conn.commit()
 
+    def clear_candidates(self) -> int:
+        """Drop inferred candidate edges so a rebuild starts clean, while preserving
+        every human verdict (authenticated and rejected edges are untouched, so a
+        rejected pair stays suppressed). Returns the number removed."""
+        cur = self.conn.execute(
+            "DELETE FROM edges WHERE status='candidate' AND source='inferred'")
+        self.conn.commit()
+        return cur.rowcount
+
     def _insert_candidate(self, a: str, b: str, descriptors: list[str], score: float,
                           evidence: Optional[dict] = None) -> None:
         """Persist an inferred candidate, but never overwrite a human verdict."""
