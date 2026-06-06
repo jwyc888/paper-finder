@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from paperfinder.core.finder import PaperFinder, HashingEmbedder
 from paperfinder.graph.relationship import RelationshipGraph
 from paperfinder.studio.studyset import build_studyset, ids_for_folder
-from paperfinder.studio.synthesis import synthesize
+from paperfinder.studio.synthesis import synthesize, compare_models
 
 DB = "test_studio.db"
 REL = "test_studio_rel.db"
@@ -67,6 +67,26 @@ def main():
     out = synthesize(ss, complete=stub)
     reduce_prompt = next((c["prompt"] for c in calls if "cross-paper synthesis" in c["prompt"]), "")
 
+    # --- compare mode: both models on the same set ---
+    def stub2(prompt, system=None, frontier=False, max_tokens=1500):
+        tag = "F" if frontier else "L"
+        return f"{tag}:reduce" if "cross-paper synthesis" in prompt else f"{tag}:map"
+
+    runs = compare_models(ss, complete=stub2)
+    compare_ok = (len(runs) == 2
+                  and runs[0]["label"] == "Local model" and runs[0]["text"] == "L:reduce"
+                  and runs[1]["label"] == "Frontier model" and runs[1]["text"] == "F:reduce"
+                  and all(r["seconds"] >= 0 for r in runs))
+
+    def stub_fail(prompt, system=None, frontier=False, max_tokens=1500):
+        if frontier:
+            raise RuntimeError("no key")
+        return "local ok"
+
+    runs_fail = compare_models(ss, complete=stub_fail)
+    fail_capture_ok = (runs_fail[0]["text"] == "local ok"
+                       and runs_fail[1]["text"].startswith("(this run failed"))
+
     checks = [
         ("both selected papers assembled", titles == {"Telomerase and aging", "Senescence markers"}),
         ("paper text is carried into the set", any("telomerase" in p.text for p in ss.papers)),
@@ -78,6 +98,8 @@ def main():
         ("reduce prompt includes connection evidence", "senescence drives inflammation" in reduce_prompt),
         ("reduce asks the cross-paper questions", "Points of divergence" in reduce_prompt and "Gaps and open questions" in reduce_prompt),
         ("synthesis returns the reduced output", out == "REDUCED SYNTHESIS"),
+        ("compare runs both models, labeled and timed", compare_ok),
+        ("compare captures a failed run without aborting the other", fail_capture_ok),
         ("empty set is handled", synthesize(build_studyset(pf, rg, []), complete=stub).startswith("No papers")),
     ]
 

@@ -9,6 +9,8 @@ The `complete` callable is injectable so tests can run without a live model.
 
 from paperfinder.studio import llm as _llm
 
+import time
+
 PER_PAPER_CHARS = 12000          # trim each paper for the map step (bounds local context)
 
 _MAP_SYSTEM = "You are a careful research assistant. Summarize a single paper factually."
@@ -71,3 +73,23 @@ def synthesize(studyset, frontier: bool = False, complete=None, max_tokens: int 
                                        frontier=frontier, max_tokens=700)
     return complete(_reduce_prompt(studyset, summaries), system=_REDUCE_SYSTEM,
                     frontier=frontier, max_tokens=max_tokens)
+
+
+def compare_models(studyset, complete=None, max_tokens: int = 2000) -> list:
+    """Run the synthesis on both the local and the frontier model over the same set.
+
+    Returns a list of dicts: {label, model, seconds, text}. A failed run (e.g. no
+    API key for the frontier model) is captured as text rather than aborting the
+    other run, so the comparison file always has whatever did succeed.
+    """
+    runs = []
+    for label, frontier, model in (("Local model", False, _llm.LLM_MODEL),
+                                    ("Frontier model", True, _llm.FRONTIER_MODEL)):
+        t0 = time.perf_counter()
+        try:
+            text = synthesize(studyset, frontier=frontier, complete=complete, max_tokens=max_tokens)
+        except Exception as e:
+            text = f"(this run failed: {e})"
+        runs.append({"label": label, "model": model,
+                     "seconds": time.perf_counter() - t0, "text": text})
+    return runs
