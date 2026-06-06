@@ -47,6 +47,19 @@ _TEMPLATE = """<!DOCTYPE html>
   .vis-tooltip{font-family:"Newsreader",Georgia,serif !important;max-width:380px;white-space:normal !important;
     background:#fffdf8 !important;border:1px solid var(--line) !important;color:var(--ink) !important;
     border-radius:6px !important;padding:10px 12px !important;box-shadow:0 4px 14px rgba(0,0,0,.10) !important}
+  #chat{display:none;flex-direction:column;position:fixed;left:24px;top:calc(100vh - 472px);width:420px;height:440px;min-width:280px;min-height:200px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);background:#fffdf8;border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:12px;z-index:10;resize:both;overflow:hidden}
+  #chat-head{display:flex;align-items:center;gap:8px;margin:0 0 8px;cursor:move;user-select:none}
+  #chat-head h2{font-family:"Fraunces",Georgia,serif;font-weight:500;font-size:14px;margin:0}
+  #chat-max{margin-left:auto;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:6px;font-size:12px;padding:2px 8px;color:var(--ink)}
+  #chat-log{flex:1;overflow-y:auto;font-size:13px;line-height:1.45;margin-bottom:8px}
+  #chat-row{display:flex;gap:6px}
+  #chat-box{flex:1;font-family:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+  #chat .cmsg{margin-bottom:8px}
+  #chat .cu{color:var(--muted)}
+  #chat .cb .ans{white-space:pre-wrap}
+  #chat .csrc{margin-top:4px;color:var(--muted)}
+  #chat .csrc a{color:var(--teal);cursor:pointer;text-decoration:underline}
+  #chat .thinking{color:var(--muted);font-style:italic}
 </style></head>
 <body>
   <header>
@@ -70,9 +83,11 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="net"></div>
   <div class="hint">__HINT__</div>
   __REVIEWUI__
+  __CHATUI__
 <script>
   const G = __DATA__;
   const INTERACTIVE = __INTERACTIVE__;
+  const CHAT = __CHAT__;
   const teal = "#0f6e56", amber = "#a06414", ink = "#27241d";
   const esc = s => (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const trim = (s, n=240) => { s = (s||"").replace(/\\s+/g," ").trim(); return s.length>n ? s.slice(0,n)+"\\u2026" : s; };
@@ -82,6 +97,7 @@ _TEMPLATE = """<!DOCTYPE html>
   const topFolder = n => { const f = (n.folder || ""); return f ? f.split("/")[0] : ""; };
   const PALETTE = ["#0f6e56","#a06414","#3b6ea5","#8a5a2b","#6b7e3a","#2f7d7d","#9a3b6e","#5b6770"];
   const ROOTCOLOR = "#b8b2a7";
+  const FOCUSFILL = "#ffd23f";   // bright, distinct from every folder color, for the in-focus node
   const topFolders = [...new Set(G.nodes.map(topFolder).filter(Boolean))].sort();
   const folderColor = {}; topFolders.forEach((f, i) => folderColor[f] = PALETTE[i % PALETTE.length]);
   const colorFor = n => { const t = topFolder(n); return t ? folderColor[t] : ROOTCOLOR; };
@@ -101,7 +117,8 @@ _TEMPLATE = """<!DOCTYPE html>
     url: nodeUrl(n),
     shape: "dot", size: 13,
     widthConstraint: { maximum: 170 },
-    color: { background: colorFor(n), border: ink, highlight: { background: colorFor(n), border: amber } },
+    borderWidthSelected: 3,
+    color: { background: colorFor(n), border: ink, highlight: { background: FOCUSFILL, border: amber } },
     font: { face: "Newsreader", size: 15, color: ink, multi: false }
   })));
 
@@ -215,6 +232,78 @@ _TEMPLATE = """<!DOCTYPE html>
       document.body.innerHTML = "<div style='padding:48px 40px;font-family:Newsreader,Georgia,serif;font-size:18px;color:#27241d'>Review server stopped. You can close this tab.</div>";
     };
   }
+
+  if (CHAT) {
+    const panel = document.getElementById("chat");
+    panel.style.display = "flex";
+    const head = document.getElementById("chat-head");
+    let drag = null;
+    head.addEventListener("mousedown", e => {
+      if (e.target.id === "chat-max") return;
+      const r = panel.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", e => {
+      if (!drag) return;
+      let x = Math.max(0, Math.min(e.clientX - drag.dx, window.innerWidth - panel.offsetWidth));
+      let y = Math.max(0, Math.min(e.clientY - drag.dy, window.innerHeight - panel.offsetHeight));
+      panel.style.left = x + "px"; panel.style.top = y + "px";
+    });
+    document.addEventListener("mouseup", () => { drag = null; });
+    const maxBtn = document.getElementById("chat-max");
+    let saved = null;
+    maxBtn.onclick = () => {
+      if (saved) {
+        Object.assign(panel.style, saved); saved = null; maxBtn.textContent = "Max";
+      } else {
+        saved = { left: panel.style.left, top: panel.style.top, width: panel.style.width, height: panel.style.height };
+        panel.style.left = "16px"; panel.style.top = "16px";
+        panel.style.width = (window.innerWidth - 32) + "px";
+        panel.style.height = (window.innerHeight - 32) + "px";
+        maxBtn.textContent = "Restore";
+      }
+    };
+    const clog = document.getElementById("chat-log");
+    const cbox = document.getElementById("chat-box");
+    const nodeIds = new Set(G.nodes.map(n => n.id));
+    const cbubble = cls => { const d = document.createElement("div"); d.className = "cmsg " + cls; clog.appendChild(d); clog.scrollTop = clog.scrollHeight; return d; };
+    const focusNodes = ids => {
+      const hl = ids.filter(d => nodeIds.has(d));
+      if (!hl.length) return;
+      network.unselectAll();
+      network.selectNodes(hl);
+      network.fit({ nodes: hl, animation: { duration: 600 } });
+    };
+    const cask = async () => {
+      const q = cbox.value.trim(); if (!q) return;
+      cbox.value = "";
+      cbubble("cu").textContent = "> " + q;
+      const t = cbubble("cb");
+      const th = document.createElement("div"); th.className = "thinking"; th.textContent = "thinking..."; t.appendChild(th);
+      try {
+        const r = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: q }) });
+        const d = await r.json();
+        t.innerHTML = "";
+        const ans = document.createElement("div"); ans.className = "ans"; ans.textContent = d.answer || ""; t.appendChild(ans);
+        const srcs = d.sources || [];
+        if (srcs.length) {
+          const sd = document.createElement("div"); sd.className = "csrc"; sd.appendChild(document.createTextNode("sources: "));
+          srcs.forEach((s, i) => {
+            const a = document.createElement("a"); a.textContent = s.title; a.title = "focus in graph";
+            a.onclick = () => focusNodes([s.doc_id]);
+            sd.appendChild(a);
+            if (i < srcs.length - 1) sd.appendChild(document.createTextNode(", "));
+          });
+          t.appendChild(sd);
+          focusNodes(srcs.map(s => s.doc_id));
+        }
+      } catch (e) { t.innerHTML = ""; t.textContent = "(error: " + e + ")"; }
+      clog.scrollTop = clog.scrollHeight;
+    };
+    document.getElementById("chat-send").onclick = cask;
+    cbox.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); cask(); } });
+  }
 </script>
 </body></html>"""
 
@@ -229,18 +318,30 @@ _REVIEW_UI = """<div id="review">
     <div id="rv-msg"></div>
   </div>"""
 
+_CHAT_UI = """<div id="chat">
+    <div id="chat-head"><h2>Ask the library</h2><button id="chat-max" title="Maximize / restore">Max</button></div>
+    <div id="chat-log"></div>
+    <div id="chat-row">
+      <input id="chat-box" type="text" placeholder="what do I have on...">
+      <button id="chat-send" class="btn btn-auth">Ask</button>
+    </div>
+  </div>"""
+
 
 def render_html(graph: dict, title: str = "Paper relationships",
-                interactive: bool = False) -> str:
+                interactive: bool = False, chat: bool = False) -> str:
     base_hint = "Drag nodes to rearrange. Drag the slider to hide weaker connections. Click a node to open the paper."
     review_hint = " Click an edge to authenticate or reject the connection."
+    chat_hint = " Ask the box on the left and the matching papers highlight."
     return (_TEMPLATE
             .replace("__TITLE__", title)
             .replace("__DATA__", json.dumps(graph))
             .replace("__INTERACTIVE__", "true" if interactive else "false")
+            .replace("__CHAT__", "true" if chat else "false")
             .replace("__DONE__", '<button id="done" class="btn">Done reviewing</button>' if interactive else "")
             .replace("__REVIEWUI__", _REVIEW_UI if interactive else "")
-            .replace("__HINT__", base_hint + (review_hint if interactive else "")))
+            .replace("__CHATUI__", _CHAT_UI if chat else "")
+            .replace("__HINT__", base_hint + (review_hint if interactive else "") + (chat_hint if chat else "")))
 
 
 def build_viz(graph: dict, path: str, title: str = "Paper relationships") -> None:

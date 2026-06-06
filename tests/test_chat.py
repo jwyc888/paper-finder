@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from paperfinder.core.finder import PaperFinder, HashingEmbedder
-from paperfinder.studio.chat import ChatSession, retrieve
+from paperfinder.studio.chat import ChatSession, retrieve, web_sources
 
 DB = "test_chat.db"
 
@@ -62,6 +62,17 @@ def main():
          all(c["frontier"] is False for c in calls if "Rewrite the follow-up" in c["prompt"])),
         ("structured sources returned for GUI mapping", isinstance(res2["sources"], list)),
         ("folder scope filters retrieval", all(h["doc_id"] != "gdrive:gwas" for h in retrieve(pf, "polygenic blockLASSO", k=3, folder="BioBank ref"))),
+    ]
+
+    ws = web_sources([
+        {"doc_id": "gdrive:abc", "title": "P1", "source_url": ""},
+        {"doc_id": "gdrive:abc", "title": "P1", "source_url": ""},
+        {"doc_id": "x", "title": "P2", "source_url": "http://e/p2"},
+    ])
+    checks += [
+        ("web_sources dedupes and keeps doc_id", [s["doc_id"] for s in ws] == ["gdrive:abc", "x"]),
+        ("web_sources derives a Drive link", ws[0]["link"] == "https://drive.google.com/file/d/abc/view"),
+        ("web_sources keeps an explicit url", ws[1]["link"] == "http://e/p2"),
     ]
 
     print("=== chat: multi-turn RAG over the library ===")

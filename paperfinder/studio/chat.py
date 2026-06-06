@@ -78,6 +78,21 @@ def _answer_prompt(passages, history, question: str) -> str:
     return "\n".join(parts)
 
 
+def web_sources(sources) -> list:
+    """Deduped sources for a web UI: keep doc_id (for node highlighting), title, and a link."""
+    seen, out = set(), []
+    for p in sources or []:
+        did = p.get("doc_id")
+        if not did or did in seen:
+            continue
+        seen.add(did)
+        link = p.get("source_url") or (
+            "https://drive.google.com/file/d/" + did[7:] + "/view"
+            if str(did).startswith("gdrive:") else "")
+        out.append({"doc_id": did, "title": p.get("title") or did, "link": link})
+    return out
+
+
 class ChatSession:
     """Holds conversation state for multi-turn chat over the library."""
 

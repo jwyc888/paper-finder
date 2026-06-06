@@ -55,6 +55,9 @@ def main() -> int:
                    "topFolder" in static_html))
     checks.append(("static: color-by-folder + folder legend present",
                    "colorFor" in static_html and 'id="folderlegend"' in static_html))
+    checks.append(("static: in-focus node gets a distinct bright highlight",
+                   "FOCUSFILL" in static_html and "#ffd23f" in static_html
+                   and "highlight: { background: FOCUSFILL" in static_html))
     checks.append(("static: cross-folder emphasis toggle present",
                    'id="emph"' in static_html))
     checks.append(("static: cross-folder edge logic present",
@@ -71,6 +74,21 @@ def main() -> int:
                    and "/shutdown" in interactive_html))
     checks.append(("interactive: Done button present", 'id="done"' in interactive_html))
     checks.append(("interactive: INTERACTIVE flag true", "INTERACTIVE = true" in interactive_html))
+    checks.append(("interactive: chat panel off by default",
+                   "CHAT = false" in interactive_html and 'id="chat-box"' not in interactive_html))
+
+    chat_html = render_html(GRAPH, interactive=True, chat=True)
+    checks.append(("chat: CHAT flag true", "CHAT = true" in chat_html))
+    checks.append(("chat: panel and input present",
+                   'id="chat"' in chat_html and 'id="chat-box"' in chat_html and 'id="chat-send"' in chat_html))
+    checks.append(("chat: /chat endpoint wired", "/chat" in chat_html))
+    checks.append(("chat: highlight-on-answer logic present",
+                   "focusNodes" in chat_html and "selectNodes" in chat_html))
+    checks.append(("chat: panel is resizable", "resize:both" in chat_html))
+    checks.append(("chat: draggable title bar present",
+                   'id="chat-head"' in chat_html and "mousemove" in chat_html))
+    checks.append(("chat: maximize/restore control present",
+                   'id="chat-max"' in chat_html and "window.innerWidth" in chat_html))
 
     ok = True
     for name, passed in checks:

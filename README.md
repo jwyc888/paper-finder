@@ -72,6 +72,8 @@ paperfinder serve                    # query API at http://127.0.0.1:8000
 | `PAPERFINDER_LLM_MODEL` | model tag | `llama3.1:8b` |
 | `PAPERFINDER_GRAPH_HTML` | path | `paper_graph.html` |
 | `PAPERFINDER_REVIEW_PORT` | port | `8765` |
+| `PAPERFINDER_FRONTIER_MODEL` | Anthropic model id (studio `--frontier`) | `claude-sonnet-4-6` |
+| `ANTHROPIC_API_KEY` | required only for studio `--frontier` | unset |
 
 The default embedder is a dependency-free lexical stand-in — fine for plumbing,
 not for real semantic search. Set `PAPERFINDER_EMBEDDER=st` (after `pip install -e ".[st]"`)
@@ -139,6 +141,60 @@ tail -n 20 ~/Library/Logs/paperfinder-daily.log
 
 To stop or remove it: `launchctl bootout gui/$(id -u)/com.bioratio.paperfinder.daily`
 then delete the plist.
+
+## Studio: chat and synthesis
+
+The studio turns a selected set of papers into learning media. It runs on the
+local model by default (the same `PAPERFINDER_LLM_URL` / `PAPERFINDER_LLM_MODEL`
+used for stripping); add `--frontier` to answer with Anthropic instead (needs
+`ANTHROPIC_API_KEY`, optionally `PAPERFINDER_FRONTIER_MODEL`, both read from `.env`).
+
+**Chat** is a multi-turn RAG conversation over the indexed corpus: it retrieves the
+most relevant passages, answers grounded in them, cites papers by title, and
+rewrites follow-ups so multi-turn questions work. It needs the real index, so set
+`PAPERFINDER_EMBEDDER=st` and `PAPERFINDER_VECTOR_STORE=qdrant` (the first turn
+loads the embedding model).
+
+```
+venv/bin/python examples/chat.py                         # whole corpus, local model
+venv/bin/python examples/chat.py --folder "BioBank ref"  # scope to a folder (or beneath it)
+venv/bin/python examples/chat.py --frontier              # answer with Anthropic
+venv/bin/python examples/chat.py --k 12                  # passages per turn (default 8)
+```
+
+At the prompt: type a question; `/reset` clears the conversation; `/quit` (also
+`/q`, `/exit`, `exit`, or Ctrl-D) exits; Ctrl-C aborts a slow generation and returns
+to the prompt. Best for pinpoint questions ("what do I have on X"); broad
+"summarize everything" questions are the synthesis tool's job.
+
+**Chat window** is the same engine behind a local browser page (a thin caller of the
+chat engine, stdlib server, no extra dependencies). It opens a transcript with an
+input box, holds one conversation, and shows each answer's source papers as links.
+Binds to `127.0.0.1` only; renders offline.
+
+```
+venv/bin/python examples/chat_web.py                        # whole corpus, local model
+venv/bin/python examples/chat_web.py --folder "BioBank ref"
+venv/bin/python examples/chat_web.py --frontier             # answer with Anthropic
+venv/bin/python examples/chat_web.py --k 12 --port 8770     # passages per turn; server port (default 8770)
+```
+
+A browser opens automatically. Type a question and press Enter (Shift+Enter for a
+newline), "Reset" clears the conversation, "Stop server" (or Ctrl-C) shuts it down.
+Model and scope are fixed at launch by the flags above.
+
+**Synthesis** writes a cross-paper synthesis (shared topic, common ground, points of
+agreement, points of divergence, gaps, and how they fit together) over a study set,
+which is just a list of papers given as explicit ids or a folder.
+
+```
+venv/bin/python examples/synthesize.py --folder "BioBank ref"
+venv/bin/python examples/synthesize.py --ids gdrive:AAA gdrive:BBB
+venv/bin/python examples/synthesize.py --folder "BioBank ref" --frontier   # higher fidelity
+venv/bin/python examples/synthesize.py --folder "BioBank ref" --compare    # local vs frontier, side by side, timed
+```
+
+Output is written to `studysets/` as Markdown.
 
 ## Notes / current limits (deferred by design)
 
