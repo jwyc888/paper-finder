@@ -1,3 +1,154 @@
+#!/bin/bash
+set -e
+PKG=$(python3 -c "import paperfinder, os; print(os.path.dirname(paperfinder.__file__))")
+REPO=$(python3 -c "import paperfinder, os; print(os.path.dirname(os.path.dirname(paperfinder.__file__)))")
+echo "package dir: $PKG"; echo "repo dir:    $REPO"; mkdir -p "$REPO/tests"
+cat > "$PKG/core/sectionstrip.py" <<'EOF_SECTIONSTRIP'
+"""
+sectionstrip.py - remove bibliography/supplementary back-matter before chunking.
+
+References, Bibliography, and Supplementary sections inflate cross-document
+similarity (citation formatting and shared citations look alike across papers),
+so they pollute the relationship graph. We drop them while KEEPING the Appendix
+and the body.
+
+A cheap regex finds candidate heading lines; a local LLM (any OpenAI-compatible
+endpoint, e.g. Ollama) adjudicates which candidates are real section starts and
+of what type. Sections span from one heading to the next, so an Appendix that
+sits AFTER the references is still preserved. Any failure (no endpoint, bad
+output, no candidates) returns the text unchanged: we never silently drop body.
+
+Config (env):
+  PAPERFINDER_LLM_URL    OpenAI-compatible base URL (default http://localhost:11434/v1)
+  PAPERFINDER_LLM_MODEL  model tag (default llama3.1:8b)
+"""
+
+import json
+import os
+import re
+import urllib.request
+
+LLM_URL = os.environ.get("PAPERFINDER_LLM_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.environ.get("PAPERFINDER_LLM_MODEL", "llama3.1:8b")
+
+REMOVE_TYPES = {"references", "bibliography", "supplementary"}
+KEEP_TYPES = {"appendix"}            # appendix + body are retained
+SECTION_TYPES = REMOVE_TYPES | KEEP_TYPES
+
+_KEYWORD_RE = re.compile(
+    r"^\s*(?:\d+\.?\s+|[a-z]\.?\s+|[ivxlc]+\.?\s+)?"          # optional numbering/lettering
+    r"(references?|bibliography|works\s+cited|literature\s+cited|"
+    r"supplementary[\w\s]*|supporting\s+information|appendix|appendices)\b",
+    re.IGNORECASE,
+)
+
+
+def find_candidates(text: str, max_heading_len: int = 60) -> list[dict]:
+    """Heading-like lines that might start back-matter. Short lines only, so a
+    sentence that merely mentions 'references' is not picked up."""
+    out = []
+    for i, line in enumerate(text.splitlines()):
+        s = line.strip()
+        if s and len(s) <= max_heading_len and _KEYWORD_RE.match(s):
+            out.append({"line": i, "text": s})
+    return out
+
+
+def _build_prompt(text_lines: list[str], candidates: list[dict]) -> str:
+    items = []
+    for c in candidates:
+        i = c["line"]
+        following = " ".join(l.strip() for l in text_lines[i + 1:i + 4])[:120]
+        items.append(f'[line {i}] "{c["text"]}"  | following: {following}')
+    listing = "\n".join(items)
+    return (
+        "You label section headings in a scientific paper. For each candidate "
+        "line below, classify it as exactly one of: references, bibliography, "
+        "supplementary, appendix, body. Use 'body' if the line is NOT a real "
+        "back-matter section heading (a false positive). Judge from the heading "
+        "and the text that follows it.\n\n"
+        "Return ONLY a JSON array, one object per candidate, in the same order, "
+        'like: [{"line": 412, "type": "references"}]. No prose, no code fences.\n\n'
+        f"Candidates:\n{listing}\n"
+    )
+
+
+def _llm_classify(text_lines: list[str], candidates: list[dict],
+                  timeout: float = 60.0) -> list[dict]:
+    """Ask the local model to type each candidate. Returns [] on any failure so
+    the caller falls back to leaving the text untouched."""
+    prompt = _build_prompt(text_lines, candidates)
+    payload = json.dumps({
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        LLM_URL.rstrip("/") + "/chat/completions",
+        data=payload, headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+        content = body["choices"][0]["message"]["content"]
+        return _parse_decisions(content)
+    except Exception:
+        return []
+
+
+def _parse_decisions(content: str) -> list[dict]:
+    """Pull the JSON array out of a model reply, tolerating stray fences/prose."""
+    content = content.strip()
+    if "```" in content:                       # strip code fences if present
+        content = re.sub(r"```[a-zA-Z]*", "", content).replace("```", "").strip()
+    start, end = content.find("["), content.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        data = json.loads(content[start:end + 1])
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for d in data if isinstance(data, list) else []:
+        if isinstance(d, dict) and "line" in d and "type" in d:
+            out.append({"line": int(d["line"]), "type": str(d["type"]).lower().strip()})
+    return out
+
+
+def strip_back_matter(text: str, classify=_llm_classify) -> str:
+    """Return `text` with references/bibliography/supplementary sections removed
+    and appendix/body kept. `classify` is injectable for testing; by default it
+    calls the local LLM. Safe: returns the original text on anything unexpected."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    candidates = find_candidates(text)
+    if not candidates:
+        return text
+
+    decisions = classify(lines, candidates)
+    # keep only decisions that name a real section start at a known candidate line
+    cand_lines = {c["line"] for c in candidates}
+    starts = sorted(
+        (d for d in decisions if d["line"] in cand_lines and d["type"] in SECTION_TYPES),
+        key=lambda d: d["line"],
+    )
+    if not starts:
+        return text
+
+    # each section runs from its heading to the next section start (or EOF)
+    bounds = [s["line"] for s in starts] + [len(lines)]
+    remove = set()
+    for idx, s in enumerate(starts):
+        if s["type"] in REMOVE_TYPES:
+            remove.update(range(bounds[idx], bounds[idx + 1]))
+
+    kept = [ln for i, ln in enumerate(lines) if i not in remove]
+    cleaned = "\n".join(kept).strip()
+    return cleaned or text          # never return empty if we started with content
+EOF_SECTIONSTRIP
+cat > "$PKG/core/finder.py" <<'EOF_FINDER'
 """
 paperfinder.py — Tier A core.
 
@@ -646,3 +797,92 @@ class PaperFinder:
 def _ref_json(ref: DocumentRef) -> str:
     return json.dumps({"doc_id": ref.doc_id, "name": ref.name, "kind": ref.kind,
                        "source_url": ref.source_url, "modified": ref.modified})
+EOF_FINDER
+cat > "$REPO/tests/test_sectionstrip.py" <<'EOF_TEST'
+"""Back-matter stripping: references/bibliography/supplementary are removed while
+body and appendix are kept, including when the appendix sits AFTER the references.
+Failure modes (no candidates, empty/failed classifier) leave the text untouched.
+The LLM is injected as a fake so the span logic is tested deterministically.
+
+Run:  python3 tests/test_sectionstrip.py
+"""
+
+import sys
+
+from paperfinder.core.sectionstrip import find_candidates, strip_back_matter
+
+DOC = """Title of the Paper
+We present a method for studying telomerase in cell lines.
+The body discusses results and their significance in detail.
+
+Appendix A
+Extended derivations and supporting tables for the body.
+
+References
+1. Smith J, et al. Nature 2020;580:1-10.
+2. Doe A, et al. Cell 2019;177:200-210.
+
+Supplementary Information
+Figure S1 shows additional control experiments.
+"""
+
+
+def fake_classifier(lines, candidates):
+    """Type each candidate by its heading text (stands in for the local LLM)."""
+    out = []
+    for c in candidates:
+        t = c["text"].lower()
+        if t.startswith("appendix"):
+            out.append({"line": c["line"], "type": "appendix"})
+        elif t.startswith("reference"):
+            out.append({"line": c["line"], "type": "references"})
+        elif t.startswith("supplementary"):
+            out.append({"line": c["line"], "type": "supplementary"})
+        else:
+            out.append({"line": c["line"], "type": "body"})
+    return out
+
+
+def main() -> int:
+    checks = []
+
+    cands = {c["text"].split()[0].lower() for c in find_candidates(DOC)}
+    checks.append(("finds appendix/references/supplementary headings",
+                   {"appendix", "references", "supplementary"} <= cands))
+
+    cleaned = strip_back_matter(DOC, classify=fake_classifier)
+    checks.append(("body is kept", "method for studying telomerase" in cleaned))
+    checks.append(("appendix kept even though it precedes references",
+                   "Extended derivations" in cleaned))
+    checks.append(("references section removed", "Smith J" not in cleaned and "Nature 2020" not in cleaned))
+    checks.append(("supplementary section removed", "Figure S1" not in cleaned))
+
+    # appendix AFTER references must survive (reordered doc)
+    reordered = ("Body text about telomerase.\n\nReferences\n1. X et al.\n\n"
+                 "Appendix B\nKept appendix content here.\n")
+    out2 = strip_back_matter(reordered, classify=fake_classifier)
+    checks.append(("appendix after references survives",
+                   "Kept appendix content" in out2 and "1. X et al." not in out2))
+
+    # fallback: a classifier that fails (returns nothing) leaves text untouched
+    untouched = strip_back_matter(DOC, classify=lambda lines, cands: [])
+    checks.append(("empty classifier result -> text unchanged", untouched == DOC))
+
+    # fallback: no candidate headings -> unchanged
+    plain = "Just body text with no back matter at all."
+    checks.append(("no candidates -> text unchanged",
+                   strip_back_matter(plain, classify=fake_classifier) == plain))
+
+    ok = True
+    for name, passed in checks:
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+        ok = ok and passed
+    print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF_TEST
+echo "finder references strip: $(grep -c strip_back_matter "$PKG/core/finder.py")"
+echo "sectionstrip module:     $(grep -c "def strip_back_matter" "$PKG/core/sectionstrip.py")"

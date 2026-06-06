@@ -1,3 +1,8 @@
+#!/bin/bash
+set -e
+TARGET=$(python3 -c "import paperfinder.graph.relationship as m; print(m.__file__)")
+echo "Writing to: $TARGET"
+cat > "$TARGET" <<'PFEOF'
 """
 relationship_graph.py - v0 of the paper-finder relationship layer.
 
@@ -313,3 +318,5 @@ class RelationshipGraph:
                 "confidence": r["confidence"],
             })
         return {"nodes": nodes, "edges": edges}
+PFEOF
+echo "record_candidate count: $(grep -c 'def record_candidate' "$TARGET")"
