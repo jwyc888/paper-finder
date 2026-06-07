@@ -16,6 +16,9 @@ import show_graph  # noqa: E402
 class StubSession:
     def __init__(self):
         self.asked = []
+        self.finder = None        # build_studyset is monkeypatched, so unused
+        self.frontier = False
+        self._complete = lambda *a, **k: "stub"
 
     def ask(self, msg):
         self.asked.append(msg)
@@ -36,6 +39,22 @@ def _post(port, path, body):
             return r.status, json.loads(r.read() or "{}")
     except urllib.error.HTTPError as e:
         return e.code, {}
+
+
+def _get(port, path):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=5) as r:
+            return r.status, json.loads(r.read() or "{}"), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, {}, {}
+
+
+def _get_bytes(port, path):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=5) as r:
+            return r.status, r.read(), r.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        return e.code, b"", ""
 
 
 def _serve(chat, session):
@@ -67,6 +86,40 @@ def main():
     code2, _ = _post(port2, "/chat", {"message": "hi"})
     srv2.shutdown()
     checks.append(("chat off: /chat is 404", code2 == 404))
+
+    # --- cluster -> synthesis (background job + PDF), with the index/LLM stubbed ---
+    import tempfile, time
+    from paperfinder.studio.studyset import StudySet, Paper
+    show_graph.REL_DB = os.path.join(tempfile.mkdtemp(), "rel.db")
+    show_graph.OUTDIR = tempfile.mkdtemp()
+    orig_bs, orig_syn = show_graph.build_studyset, show_graph.synthesize
+    show_graph.build_studyset = lambda finder, rel, ids: StudySet(
+        papers=[Paper(doc_id=i, title="Paper " + i, folder="", source_url="", text="body of " + i) for i in ids])
+    show_graph.synthesize = lambda ss, frontier=False, complete=None: (
+        "# Synthesis\n\n## Shared topic\n\nThese **" + str(len(ss.papers)) + "** papers connect.\n\n- a\n- b")
+
+    sstub = StubSession()
+    srv3, port3 = _serve(True, sstub)
+    code_few, _ = _post(port3, "/synthesize", {"ids": ["only-one"]})
+    checks.append(("synthesis: <2 ids rejected", code_few == 400))
+
+    code_s, dj = _post(port3, "/synthesize", {"ids": ["p1", "p2", "p3"]})
+    checks.append(("synthesis: job starts", code_s == 200 and bool(dj.get("job_id")) and dj.get("n") == 3))
+    job = dj.get("job_id", "")
+    status, n = "", 0
+    for _ in range(50):
+        sc, sd, _h = _get(port3, "/synthesis_status?id=" + job)
+        status, n = sd.get("status"), sd.get("n")
+        if status in ("done", "error"):
+            break
+        time.sleep(0.1)
+    checks.append(("synthesis: job completes", status == "done" and n == 3))
+    dcode, dbytes, dctype = _get_bytes(port3, "/download?id=" + job)
+    checks.append(("synthesis: PDF downloads", dcode == 200 and dbytes[:5] == b"%PDF-" and "pdf" in dctype))
+    ucode, _ub, _uc = _get_bytes(port3, "/download?id=nope")
+    checks.append(("synthesis: unknown job download 404", ucode == 404))
+    srv3.shutdown()
+    show_graph.build_studyset, show_graph.synthesize = orig_bs, orig_syn
 
     ok = True
     for name, passed in checks:

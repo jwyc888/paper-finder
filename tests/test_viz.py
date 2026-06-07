@@ -89,6 +89,11 @@ def main() -> int:
                    'id="chat-head"' in chat_html and "mousemove" in chat_html))
     checks.append(("chat: maximize/restore control present",
                    'id="chat-max"' in chat_html and "window.innerWidth" in chat_html))
+    checks.append(("chat: synthesize button present", 'id="chat-syn"' in chat_html))
+    checks.append(("chat: multi-node selection enabled",
+                   "multiselect: true" in chat_html and "synSel" in chat_html))
+    checks.append(("chat: synthesis job wiring present",
+                   "/synthesize" in chat_html and "/synthesis_status" in chat_html and "/download" in chat_html))
 
     ok = True
     for name, passed in checks:

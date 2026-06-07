@@ -5,11 +5,15 @@ show_graph.py - open an interactive review session for the relationship graph.
 Stands up a small local server, opens your browser to the graph, and serves it
 with Authenticate / Reject buttons on edge-click. Clicking a node opens its source.
 
-With --chat, a chat box is docked beside the graph: ask a question and the
-answer's source papers highlight while the view zooms to them. Chat needs the real
-index (set PAPERFINDER_EMBEDDER=st and PAPERFINDER_VECTOR_STORE=qdrant); the first
-question warms up the embedder. Without --chat the window is review-only and
-lightweight, exactly as before.
+With --chat, a chat box is docked beside the graph:
+  - ask a question and the answer's source papers highlight while the view zooms;
+  - click nodes to select a cluster (double-click opens the paper), then
+    "Synthesize selected" runs a cross-paper synthesis in the background and posts
+    a downloadable PDF link when ready, so you can keep chatting meanwhile.
+
+Chat/synthesis need the real index (PAPERFINDER_EMBEDDER=st,
+PAPERFINDER_VECTOR_STORE=qdrant) and, for PDF export, reportlab (pip install
+reportlab). Without --chat the window is review-only and lightweight.
 
 Run:
     python3 examples/show_graph.py
@@ -26,8 +30,10 @@ import json
 import os
 import sys
 import threading
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 try:
     from dotenv import load_dotenv
@@ -37,11 +43,22 @@ except Exception:
 
 from paperfinder.graph.relationship import RelationshipGraph
 from paperfinder.graph.viz import render_html
+from paperfinder.studio.studyset import build_studyset
+from paperfinder.studio.synthesis import synthesize
+from paperfinder.studio.export import synthesis_to_pdf
 
 REL_DB = os.environ.get("PAPERFINDER_REL_DB", "relationships.db")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PAPERFINDER_REVIEW_PORT", "8765"))
 WHO = os.environ.get("USER", "review-ui")
+OUTDIR = os.path.join(os.getcwd(), "studysets")
+
+JOBS = {}                         # job_id -> {status, n, pdf?, error?}
+JOBS_LOCK = threading.Lock()
+
+
+def _qs_id(path):
+    return (parse_qs(urlparse(path).query).get("id") or [""])[0]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,6 +78,30 @@ class Handler(BaseHTTPRequestHandler):
             graph = RelationshipGraph(REL_DB).export_graph(include_candidates=True)
             self._send(200, render_html(graph, interactive=True, chat=self.server.chat),
                        "text/html; charset=utf-8")
+        elif self.path.startswith("/synthesis_status"):
+            with JOBS_LOCK:
+                job = dict(JOBS.get(_qs_id(self.path)) or {})
+            if not job:
+                return self._send(404, json.dumps({"status": "unknown"}))
+            out = {"status": job.get("status"), "n": job.get("n")}
+            if job.get("status") == "error":
+                out["error"] = job.get("error")
+            self._send(200, json.dumps(out))
+        elif self.path.startswith("/download"):
+            with JOBS_LOCK:
+                job = dict(JOBS.get(_qs_id(self.path)) or {})
+            pdf = job.get("pdf")
+            if job.get("status") != "done" or not pdf or not os.path.exists(pdf):
+                return self._send(404, '{"ok":false}')
+            with open(pdf, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"' % os.path.basename(pdf))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._send(404, '{"ok":false}')
 
@@ -88,18 +129,56 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 payload = {"answer": "(error: %s)" % e, "sources": []}
             self._send(200, json.dumps(payload))
+        elif self.path == "/synthesize":
+            self._start_synthesis(body)
         elif self.path == "/shutdown":
             self._send(200, '{"ok":true}')
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         else:
             self._send(404, '{"ok":false}')
 
+    def _start_synthesis(self, body):
+        sess = self.server.session
+        if not sess:
+            return self._send(404, '{"ok":false}')
+        ids = [i for i in (body.get("ids") or []) if i]
+        if len(ids) < 2:
+            return self._send(400, json.dumps({"error": "select at least two papers"}))
+        # Build the study set here, on the request thread: this is the only part
+        # that reads the shared index/SQLite. The worker below touches neither.
+        try:
+            studyset = build_studyset(sess.finder, RelationshipGraph(REL_DB), ids)
+        except Exception as e:
+            return self._send(500, json.dumps({"error": "could not build study set: %s" % e}))
+        if len(studyset.papers) < 2:
+            return self._send(400, json.dumps({"error": "fewer than two of those are known papers"}))
+
+        job_id = uuid.uuid4().hex[:12]
+        with JOBS_LOCK:
+            JOBS[job_id] = {"status": "running", "n": len(studyset.papers)}
+
+        def run():
+            try:
+                md = synthesize(studyset, frontier=sess.frontier, complete=sess._complete)
+                os.makedirs(OUTDIR, exist_ok=True)
+                pdf = os.path.join(OUTDIR, "synthesis-%s.pdf" % job_id)
+                synthesis_to_pdf(md, pdf, "Synthesis of %d papers" % len(studyset.papers),
+                                 [p.title for p in studyset.papers])
+                with JOBS_LOCK:
+                    JOBS[job_id].update(status="done", pdf=pdf)
+            except Exception as e:
+                with JOBS_LOCK:
+                    JOBS[job_id].update(status="error", error=str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+        self._send(200, json.dumps({"job_id": job_id, "n": len(studyset.papers)}))
+
 
 def main():
-    ap = argparse.ArgumentParser(description="Interactive relationship-graph review, optionally with chat.")
-    ap.add_argument("--chat", action="store_true", help="dock a chat box that highlights answer sources in the graph")
+    ap = argparse.ArgumentParser(description="Interactive relationship-graph review, optionally with chat + synthesis.")
+    ap.add_argument("--chat", action="store_true", help="dock a chat box and enable cluster synthesis")
     ap.add_argument("--folder", help="scope chat to a folder (or beneath it)")
-    ap.add_argument("--frontier", action="store_true", help="chat answers via the frontier model")
+    ap.add_argument("--frontier", action="store_true", help="chat/synthesis via the frontier model")
     ap.add_argument("--k", type=int, default=8, help="chat passages retrieved per turn")
     args = ap.parse_args()
 
@@ -115,7 +194,7 @@ def main():
         session = ChatSession(open_finder(), k=args.k, folder=args.folder, frontier=args.frontier)
 
     # Single-threaded when chatting so the shared index/SQLite stay on one thread;
-    # multi-threaded review otherwise, unchanged.
+    # synthesis runs on its own worker thread that touches neither.
     server_class = HTTPServer if args.chat else ThreadingHTTPServer
     server = server_class((HOST, PORT), Handler)
     server.session = session
@@ -125,7 +204,7 @@ def main():
     print("review session at " + url)
     tail = "authenticate/reject by clicking edges"
     if args.chat:
-        tail += "; ask the chat box on the left to highlight papers"
+        tail += "; ask the chat box, or select nodes and Synthesize selected"
     print(tail + "; click 'Done reviewing' (or Ctrl-C) to stop")
     threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

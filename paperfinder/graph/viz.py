@@ -54,6 +54,7 @@ _TEMPLATE = """<!DOCTYPE html>
   #chat-log{flex:1;overflow-y:auto;font-size:13px;line-height:1.45;margin-bottom:8px}
   #chat-row{display:flex;gap:6px}
   #chat-box{flex:1;font-family:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+  #chat-syn{margin-top:8px;width:100%;cursor:pointer}
   #chat .cmsg{margin-bottom:8px}
   #chat .cu{color:var(--muted)}
   #chat .cb .ans{white-space:pre-wrap}
@@ -181,14 +182,27 @@ _TEMPLATE = """<!DOCTYPE html>
 
   const network = new vis.Network(document.getElementById("net"), { nodes, edges: view }, {
     physics: { solver: "forceAtlas2Based", forceAtlas2Based: { gravitationalConstant: -45, springLength: 130 }, stabilization: { iterations: 220 } },
-    interaction: { hover: true, tooltipDelay: 80 },
+    interaction: { hover: true, tooltipDelay: 80, multiselect: true },
     nodes: { borderWidth: 1.5 }
+  });
+
+  const synSel = new Set();
+  const updateSynBtn = () => { const b = document.getElementById("chat-syn"); if (b) b.textContent = "Synthesize selected (" + synSel.size + ")"; };
+  network.on("doubleClick", params => {
+    if (CHAT && params.nodes.length) { const n = nodes.get(params.nodes[0]); if (n && n.url) window.open(n.url, "_blank"); }
   });
 
   let selectedEdge = null;
   network.on("click", params => {
     if (params.nodes.length) {
-      const n = nodes.get(params.nodes[0]);
+      const id = params.nodes[0];
+      if (CHAT) {
+        if (synSel.has(id)) synSel.delete(id); else synSel.add(id);
+        network.setSelection({ nodes: Array.from(synSel) });
+        updateSynBtn();
+        return;
+      }
+      const n = nodes.get(id);
       if (n && n.url) window.open(n.url, "_blank");
       return;
     }
@@ -303,6 +317,38 @@ _TEMPLATE = """<!DOCTYPE html>
     };
     document.getElementById("chat-send").onclick = cask;
     cbox.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); cask(); } });
+
+    updateSynBtn();
+    document.getElementById("chat-syn").onclick = async () => {
+      const ids = Array.from(synSel);
+      if (ids.length < 2) { cbubble("cb").textContent = "Select at least two papers (click their nodes) to synthesize."; return; }
+      const note = cbubble("cb");
+      note.textContent = "Synthesizing " + ids.length + " papers in the background. You can keep chatting; the PDF link will appear here when it is ready.";
+      let job;
+      try {
+        const r = await fetch("/synthesize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+        const d = await r.json();
+        if (!r.ok || !d.job_id) { note.textContent = "(could not start synthesis: " + (d.error || r.status) + ")"; return; }
+        job = d.job_id;
+      } catch (e) { note.textContent = "(error starting synthesis: " + e + ")"; return; }
+      const poll = setInterval(async () => {
+        try {
+          const r = await fetch("/synthesis_status?id=" + encodeURIComponent(job));
+          const d = await r.json();
+          if (d.status === "done") {
+            clearInterval(poll);
+            note.innerHTML = "";
+            note.appendChild(document.createTextNode("Synthesis ready (" + d.n + " papers). "));
+            const a = document.createElement("a"); a.href = "/download?id=" + encodeURIComponent(job);
+            a.textContent = "Download PDF"; a.setAttribute("download", "");
+            note.appendChild(a);
+          } else if (d.status === "error") {
+            clearInterval(poll);
+            note.textContent = "(synthesis failed: " + (d.error || "unknown") + ")";
+          }
+        } catch (e) { /* transient; keep polling */ }
+      }, 2000);
+    };
   }
 </script>
 </body></html>"""
@@ -325,6 +371,7 @@ _CHAT_UI = """<div id="chat">
       <input id="chat-box" type="text" placeholder="what do I have on...">
       <button id="chat-send" class="btn btn-auth">Ask</button>
     </div>
+    <button id="chat-syn" class="btn">Synthesize selected (0)</button>
   </div>"""
 
 
