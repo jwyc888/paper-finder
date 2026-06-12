@@ -13,7 +13,6 @@ _TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500&family=Newsreader:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
 <style>
   :root{--paper:#faf8f3;--ink:#27241d;--muted:#6f6a5f;--teal:#0f6e56;--amber:#a06414;--line:#e2ddd0}
@@ -78,8 +77,8 @@ _TEMPLATE = """<!DOCTYPE html>
     <input id="thr" type="range">
     <span id="thrval" class="val"></span>
     <label class="emphlbl"><input id="emph" type="checkbox" checked> Emphasize cross-folder links</label>
+    <span id="nodecnt" class="cnt"></span>
     <span id="cnt" class="cnt"></span>
-    __DONE__
   </div>
   <div id="net"></div>
   <div class="hint">__HINT__</div>
@@ -93,8 +92,9 @@ _TEMPLATE = """<!DOCTYPE html>
   const esc = s => (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const trim = (s, n=240) => { s = (s||"").replace(/\\s+/g," ").trim(); return s.length>n ? s.slice(0,n)+"\\u2026" : s; };
   const shortLabel = t => { t = (t||"").trim(); return t.length>60 ? t.slice(0,60)+"\\u2026" : t; };
-  const nodeUrl = n => n.source_url || (String(n.id).startsWith("gdrive:")
+  const rawUrl = n => n.source_url || (String(n.id).startsWith("gdrive:")
         ? "https://drive.google.com/file/d/" + String(n.id).slice(7) + "/view" : "");
+  const nodeUrl = n => { const u = rawUrl(n); return u ? (INTERACTIVE ? "/open?id=" + encodeURIComponent(n.id) : u) : ""; };
   const topFolder = n => { const f = (n.folder || ""); return f ? f.split("/")[0] : ""; };
   const PALETTE = ["#0f6e56","#a06414","#3b6ea5","#8a5a2b","#6b7e3a","#2f7d7d","#9a3b6e","#5b6770"];
   const ROOTCOLOR = "#b8b2a7";
@@ -109,19 +109,50 @@ _TEMPLATE = """<!DOCTYPE html>
     if (G.nodes.some(n => !topFolder(n))) h += "<span><span class='dot' style='background:" + ROOTCOLOR + "'></span>(root)</span>";
     fl.innerHTML = h; })();
 
-  const nodes = new vis.DataSet(G.nodes.map(n => ({
-    id: n.id,
-    label: (topFolder(n) ? "[" + topFolder(n) + "] " : "") + shortLabel(n.title),
-    title: esc(n.title)
-      + (n.folder ? "<br><span style='color:#6f6a5f'>" + esc(n.folder) + "</span>" : "")
-      + (nodeUrl(n) ? "<br><span style='color:#6f6a5f'>click to open source</span>" : ""),
-    url: nodeUrl(n),
-    shape: "dot", size: 13,
-    widthConstraint: { maximum: 170 },
-    borderWidthSelected: 3,
-    color: { background: colorFor(n), border: ink, highlight: { background: FOCUSFILL, border: amber } },
-    font: { face: "Newsreader", size: 15, color: ink, multi: false }
-  })));
+  const nodes = new vis.DataSet(G.nodes.map(n => {
+    const tip = document.createElement("div");
+    let th = "<b>" + esc(n.title) + "</b>";
+    if (n.folder) th += "<br><span style='color:#6f6a5f'>" + esc(n.folder) + "</span>";
+    const kw = (n.descriptors && n.descriptors.length)
+      ? esc(n.descriptors.slice(0, 6).join(", ")) : "";
+    if (kw) th += "<br><span style='color:#6f6a5f'>" + kw + "</span>";
+    if (nodeUrl(n)) th += "<br><span style='color:#6f6a5f'>click to open</span>";
+    tip.innerHTML = th;
+    return {
+      id: n.id,
+      label: (topFolder(n) ? "[" + topFolder(n) + "] " : "") + shortLabel(n.title),
+      title: tip,
+      url: nodeUrl(n),
+      shape: "dot", size: 13,
+      widthConstraint: { maximum: 170 },
+      borderWidthSelected: 3,
+      color: { background: colorFor(n), border: ink, highlight: { background: FOCUSFILL, border: amber } },
+      font: { face: "Georgia", size: 15, color: ink, multi: false }
+    };
+  }));
+
+  // Unconnected papers (no edges) get flung off-screen by the repulsion physics.
+  // Take them out of the sim now, then (after stabilization) park them in a grid just
+  // below the connected cluster's bounding box so they are always visible. placeIsolated
+  // runs once physics has settled, when the cluster's real extent is known.
+  const degree = {};
+  G.edges.forEach(e => { degree[e.src] = (degree[e.src] || 0) + 1; degree[e.dst] = (degree[e.dst] || 0) + 1; });
+  const isolated = G.nodes.filter(n => !degree[n.id]);
+  if (isolated.length) nodes.update(isolated.map(n => ({ id: n.id, fixed: true, physics: false })));
+  function placeIsolated() {
+    if (!isolated.length) return;
+    const connIds = G.nodes.filter(n => degree[n.id]).map(n => n.id);
+    const pos = connIds.length ? network.getPositions(connIds) : {};
+    let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id in pos) { const p = pos[id]; minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); }
+    if (!isFinite(minX)) { minX = -200; maxX = 200; maxY = -140; }
+    const cols = Math.max(1, Math.ceil(Math.sqrt(isolated.length) * 1.5));
+    const GAP = 80, width = (cols - 1) * GAP, cx = (minX + maxX) / 2;
+    nodes.update(isolated.map((n, idx) => {
+      const r = Math.floor(idx / cols), c = idx % cols;
+      return { id: n.id, x: cx - width / 2 + c * GAP, y: maxY + 140 + r * GAP, fixed: true, physics: false };
+    }));
+  }
 
   let emphasizeCross = true;
   const emphColor = "#d6336c";
@@ -166,8 +197,10 @@ _TEMPLATE = """<!DOCTYPE html>
   const thr = document.getElementById("thr");
   const thrval = document.getElementById("thrval");
   const cnt = document.getElementById("cnt");
-  thr.min = lo; thr.max = hi; thr.step = 0.01; thr.value = lo;
+  thr.min = 0; thr.max = hi; thr.step = 0.01; thr.value = lo;
   let threshold = lo;
+  const nodecnt = document.getElementById("nodecnt");
+  if (nodecnt) nodecnt.textContent = G.nodes.length + " papers (" + isolated.length + " unconnected) | ";
 
   const view = new vis.DataView(allEdges, { filter: e => e._score == null || e._score >= threshold });
   const refresh = () => {
@@ -186,23 +219,23 @@ _TEMPLATE = """<!DOCTYPE html>
     nodes: { borderWidth: 1.5 }
   });
 
+  network.once("stabilizationIterationsDone", () => { placeIsolated(); network.fit({ animation: false }); });
+  setTimeout(() => { placeIsolated(); network.fit({ animation: false }); }, 2500);
+
   const synSel = new Set();
   const updateSynBtn = () => { const b = document.getElementById("chat-syn"); if (b) b.textContent = "Synthesize selected (" + synSel.size + ")"; };
-  network.on("doubleClick", params => {
-    if (CHAT && params.nodes.length) { const n = nodes.get(params.nodes[0]); if (n && n.url) window.open(n.url, "_blank"); }
-  });
-
   let selectedEdge = null;
   network.on("click", params => {
     if (params.nodes.length) {
       const id = params.nodes[0];
-      if (CHAT) {
+      const se = params.event && params.event.srcEvent;
+      if (CHAT && se && (se.metaKey || se.ctrlKey)) {   // cmd/ctrl-click: select for synthesis
         if (synSel.has(id)) synSel.delete(id); else synSel.add(id);
         network.setSelection({ nodes: Array.from(synSel) });
         updateSynBtn();
         return;
       }
-      const n = nodes.get(id);
+      const n = nodes.get(id);                           // plain click: open the paper
       if (n && n.url) window.open(n.url, "_blank");
       return;
     }
@@ -241,10 +274,6 @@ _TEMPLATE = """<!DOCTYPE html>
       } else document.getElementById("rv-msg").textContent = "Failed to reach server.";
     };
     document.getElementById("rv-close").onclick = () => { document.getElementById("review").style.display = "none"; };
-    document.getElementById("done").onclick = async () => {
-      await post("/shutdown", {});
-      document.body.innerHTML = "<div style='padding:48px 40px;font-family:Newsreader,Georgia,serif;font-size:18px;color:#27241d'>Review server stopped. You can close this tab.</div>";
-    };
   }
 
   if (CHAT) {
@@ -296,7 +325,7 @@ _TEMPLATE = """<!DOCTYPE html>
       const t = cbubble("cb");
       const th = document.createElement("div"); th.className = "thinking"; th.textContent = "thinking..."; t.appendChild(th);
       try {
-        const r = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: q }) });
+        const r = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: q, selected: Array.from(synSel) }) });
         const d = await r.json();
         t.innerHTML = "";
         const ans = document.createElement("div"); ans.className = "ans"; ans.textContent = d.answer || ""; t.appendChild(ans);
@@ -379,13 +408,12 @@ def render_html(graph: dict, title: str = "Paper relationships",
                 interactive: bool = False, chat: bool = False) -> str:
     base_hint = "Drag nodes to rearrange. Drag the slider to hide weaker connections. Click a node to open the paper."
     review_hint = " Click an edge to authenticate or reject the connection."
-    chat_hint = " Ask the box on the left and the matching papers highlight."
+    chat_hint = " Click a paper to open it; cmd or ctrl-click papers to select them, then Synthesize selected. Ask the box and the matching papers highlight."
     return (_TEMPLATE
             .replace("__TITLE__", title)
             .replace("__DATA__", json.dumps(graph))
             .replace("__INTERACTIVE__", "true" if interactive else "false")
             .replace("__CHAT__", "true" if chat else "false")
-            .replace("__DONE__", '<button id="done" class="btn">Done reviewing</button>' if interactive else "")
             .replace("__REVIEWUI__", _REVIEW_UI if interactive else "")
             .replace("__CHATUI__", _CHAT_UI if chat else "")
             .replace("__HINT__", base_hint + (review_hint if interactive else "") + (chat_hint if chat else "")))

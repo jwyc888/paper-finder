@@ -31,3 +31,9 @@ paper_graph.html
 install_*.sh
 
 studysets/
+
+token.json
+service_account.json
+credentials.json
+
+

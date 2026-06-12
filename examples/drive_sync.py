@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-drive_sync.py — unattended nightly Drive sync via a service account.
+drive_sync.py - unattended nightly Drive sync via a service account.
 
 No browser, no token, no expiry. Authenticates with service_account.json, runs the
 in-place backfill (new files enqueued + embedded, existing skipped, removed archived),
@@ -15,6 +15,7 @@ Config (via .env or environment):
     PAPERFINDER_DB / _EMBEDDER / _VECTOR_STORE   as everywhere else
 """
 
+import argparse
 import os
 import sys
 import time
@@ -24,8 +25,16 @@ from paperfinder.cli import open_finder   # env-configured finder (DB + embedder
 
 KEY = os.environ.get("PAPERFINDER_SA_KEY", "service_account.json")
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-FOLDERS = [f.strip() for f in
-           os.environ.get("PAPERFINDER_DRIVE_FOLDERS", "MyResearch").split(",") if f.strip()]
+DEFAULT_FOLDERS = os.environ.get("PAPERFINDER_DRIVE_FOLDERS", "MyResearch")
+
+
+def parse_folders(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Sync one or more Drive folders into paper-finder.")
+    ap.add_argument("--folders", default=DEFAULT_FOLDERS,
+                    help="comma-separated Drive folder names (default: %(default)s)")
+    args = ap.parse_args(argv)
+    return [f.strip() for f in args.folders.split(",") if f.strip()]
 
 
 def drive_service():
@@ -51,6 +60,7 @@ def _qdrant_problem():
 
 
 def main() -> int:
+    folders = parse_folders()
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         svc = drive_service()
@@ -58,7 +68,7 @@ def main() -> int:
         print(f"[{stamp}] AUTH FAILED ({KEY}): {e}", flush=True)
         return 2
 
-    resolved = find_folder_ids(svc, FOLDERS)
+    resolved = find_folder_ids(svc, folders)
     ids = [i for v in resolved.values() for i in v]
     missing = [name for name, v in resolved.items() if not v]
     if missing:
@@ -85,7 +95,7 @@ def main() -> int:
         print(f"[{stamp}] SYNC FAILED: {e}", flush=True)
         return 3
 
-    print(f"[{stamp}] sync ok | folders={FOLDERS} | {stats} "
+    print(f"[{stamp}] sync ok | folders={folders} | {stats} "
           f"| active: {active} archived: {archived} "
           f"| embedder={pf.embedder.model_name} | store={pf.store.name}", flush=True)
     return 0

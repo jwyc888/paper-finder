@@ -1,5 +1,5 @@
 """
-paperfinder.py — Tier A core.
+paperfinder.py: Tier A core.
 
 Pipeline:  capture -> queue -> metadata pass (instant) -> embed pass (background)
            -> hybrid index (FTS5 keyword + dense vectors, fused by RRF).
@@ -11,7 +11,7 @@ Staged ingestion is the point:
                      adds semantic recall and full-text keyword reach.
 
 doc_id is the CANONICAL identity, shared with the relationship layer. Embeddings
-live in their own column and are a regenerable cache — re-embedding never touches
+live in their own column and are a regenerable cache, and re-embedding never touches
 identity or any verified relationship.
 
 Dense search here is brute-force cosine (fine at personal scale, zero extra deps);
@@ -181,7 +181,7 @@ def _snippet(text: str, terms: list[str], width: int = 300) -> str:
 # --------------------------------------------------------------------------- #
 class HashingEmbedder:
     """Deterministic hashed bag-of-words, L2-normalised. A stand-in so the
-    pipeline runs with zero model downloads. Lexical, not semantic — swap for a
+    pipeline runs with zero model downloads. Lexical, not semantic, so swap for a
     real model on the Mac for genuine recall."""
     model_name = "hashing-v0"
 
@@ -203,7 +203,7 @@ class HashingEmbedder:
 class STEmbedder:
     """Real semantic embeddings via sentence-transformers (e.g. bge-small).
     Lazy import so the package is only required if you actually select it.
-    UNTESTED in this sandbox (no model downloaded) — verify on the Mac."""
+    UNTESTED in this sandbox (no model downloaded), so verify on the Mac."""
 
     def __init__(self, model: str = "BAAI/bge-small-en-v1.5"):
         from sentence_transformers import SentenceTransformer
@@ -231,8 +231,12 @@ class PaperFinder:
         self.embedder = embedder or HashingEmbedder()
         # opt-in: drop references/bibliography/supplementary before chunking
         self.strip_sections = bool(os.environ.get("PAPERFINDER_STRIP_SECTIONS"))
+        # opt-in: section-aware chunking (splits on detected sections, tags each
+        # chunk, drops back-matter). Default off keeps legacy flat chunking.
+        self.section_chunks = bool(os.environ.get("PAPERFINDER_SECTION_CHUNKS"))
+        self._segment_classify = None   # injectable for tests (else the local LLM)
         self._init_schema()
-        # the pluggable dense backend — pass an instance, or name one to build
+        # the pluggable dense backend, pass an instance or name one to build
         if vector_store is not None:
             self.store: VectorStore = vector_store
         else:
@@ -257,7 +261,8 @@ class PaperFinder:
                 USING fts5(doc_id UNINDEXED, content);
             CREATE TABLE IF NOT EXISTS chunks (
                 chunk_id TEXT PRIMARY KEY,
-                doc_id TEXT, ordinal INTEGER, text TEXT
+                doc_id TEXT, ordinal INTEGER, text TEXT,
+                section_text TEXT, section_type TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
             CREATE TABLE IF NOT EXISTS jobs (
@@ -271,6 +276,8 @@ class PaperFinder:
         for ddl in (  # migrate pre-existing DBs (each is a no-op once the column exists)
             "ALTER TABLE documents ADD COLUMN archived INTEGER DEFAULT 0",
             "ALTER TABLE documents ADD COLUMN folder TEXT",
+            "ALTER TABLE chunks ADD COLUMN section_text TEXT",
+            "ALTER TABLE chunks ADD COLUMN section_type TEXT",
         ):
             try:
                 self.conn.execute(ddl)
@@ -288,6 +295,35 @@ class PaperFinder:
             "INSERT INTO meta(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         self.conn.commit()
+
+    # ---- passage building (section-aware optional) -----------------------
+    def _build_passages(self, title: str, body: str, fallback: str) -> list[dict]:
+        """Return passages to embed, each {text, section_text, section_type}.
+
+        Section-aware path (PAPERFINDER_SECTION_CHUNKS): split on detected
+        sections, drop back-matter, window WITHIN each section (no cross-section
+        overlap), and tag every chunk with the section's verbatim heading and
+        normalized type. Flat path (default): the original word-window over
+        title+body with no section labels, so legacy behaviour is unchanged."""
+        combined = f"{title}\n{body}"
+        if self.section_chunks:
+            from paperfinder.core.sectionstrip import segment, DROP_TYPES
+            spans = (segment(combined, classify=self._segment_classify)
+                     if self._segment_classify is not None else segment(combined))
+            lines = combined.splitlines()
+            out = []
+            for sp in spans:
+                if sp["section_type"] in DROP_TYPES:        # references/supplementary
+                    continue
+                span_text = "\n".join(lines[sp["start"]:sp["end"]])
+                for w in _chunk_text(span_text):
+                    out.append({"text": w, "section_text": sp["section_text"],
+                                "section_type": sp["section_type"]})
+            if out:
+                return out
+            return [{"text": fallback, "section_text": "", "section_type": "other"}]
+        passages = _chunk_text(combined) or [fallback]
+        return [{"text": w, "section_text": "", "section_type": None} for w in passages]
 
     # ---- capture ---------------------------------------------------------
     def run_capture(self, source: CaptureSource, source_key: str = "default") -> int:
@@ -343,7 +379,7 @@ class PaperFinder:
     def reconcile(self, reachable_ids, source_prefix: str) -> int:
         """Soft-archive indexed docs from this source that are no longer reachable
         (a paper deleted, or a folder/alias removed from scope). Only the LOCAL
-        index is touched — never the source. Archived docs drop out of search; the
+        index is touched, never the source. Archived docs drop out of search; the
         document row and any authenticated relationships are preserved, so it's
         reversible: re-indexing the same doc un-archives it."""
         reachable = set(reachable_ids)
@@ -419,20 +455,21 @@ class PaperFinder:
             ref = self._rehydrate(job)
             data = ref.fetch()
             full = Parser.full(ref, data)
-            if self.strip_sections and full:
+            if self.strip_sections and not self.section_chunks and full:
                 from paperfinder.core.sectionstrip import strip_back_matter
                 full = strip_back_matter(full)
             doc = self.get_document(ref.doc_id)
             base = full or doc["first_text"] or ""
-            passages = _chunk_text(f"{doc['title']}\n{base}") or [doc["title"] or ref.name]
+            passages = self._build_passages(doc["title"] or "", base, doc["title"] or ref.name)
             now = time.time()
             self._delete_chunks(ref.doc_id)            # re-embed safety: replace cleanly
-            for i, passage in enumerate(passages):
+            for i, p in enumerate(passages):
                 cid = f"{ref.doc_id}#{i}"
-                self.store.upsert(cid, self.embedder.embed(passage))
+                self.store.upsert(cid, self.embedder.embed(p["text"]))
                 self.conn.execute(
-                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
-                    (cid, ref.doc_id, i, passage))
+                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text,section_text,section_type) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (cid, ref.doc_id, i, p["text"], p["section_text"], p["section_type"]))
             self.conn.execute(
                 """UPDATE documents SET full_text=?, embedding_model=?, embedded_at=?
                    WHERE doc_id=?""",
@@ -452,17 +489,18 @@ class PaperFinder:
         self.embedder = embedder
         for d in self.all_documents():
             base = d["full_text"] or d["first_text"] or ""
-            if self.strip_sections and base:
+            if self.strip_sections and not self.section_chunks and base:
                 from paperfinder.core.sectionstrip import strip_back_matter
                 base = strip_back_matter(base)
-            passages = _chunk_text(f"{d['title']}\n{base}") or [d["title"] or ""]
+            passages = self._build_passages(d["title"] or "", base, d["title"] or "")
             self._delete_chunks(d["doc_id"])
-            for i, passage in enumerate(passages):
+            for i, p in enumerate(passages):
                 cid = f"{d['doc_id']}#{i}"
-                self.store.upsert(cid, embedder.embed(passage))
+                self.store.upsert(cid, embedder.embed(p["text"]))
                 self.conn.execute(
-                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
-                    (cid, d["doc_id"], i, passage))
+                    "INSERT INTO chunks(chunk_id,doc_id,ordinal,text,section_text,section_type) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (cid, d["doc_id"], i, p["text"], p["section_text"], p["section_type"]))
             self.conn.execute(
                 "UPDATE documents SET full_text=?, embedding_model=?, embedded_at=? WHERE doc_id=?",
                 (base, embedder.model_name, time.time(), d["doc_id"]))
@@ -475,7 +513,7 @@ class PaperFinder:
         self.conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
 
     def doc_vector(self, doc_id: str) -> Optional[list[float]]:
-        """Centroid of a document's chunk vectors — a single-vector view of a doc
+        """Centroid of a document's chunk vectors, a single-vector view of a doc
         for callers (e.g. the relationship layer) that still want one per document."""
         vecs = []
         for r in self.conn.execute("SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)):
@@ -494,7 +532,7 @@ class PaperFinder:
                           kind: str = "text", folder: str = "") -> None:
         """Index a document directly from in-memory text (metadata + chunked embed
         in one call). Convenience for programmatic ingestion and tests."""
-        if self.strip_sections and text:
+        if self.strip_sections and not self.section_chunks and text:
             from paperfinder.core.sectionstrip import strip_back_matter
             text = strip_back_matter(text)
         now = time.time()
@@ -512,14 +550,15 @@ class PaperFinder:
             (doc_id, title, source_url, kind, doi, json.dumps([]),
              text[:2000], text, folder, self.embedder.model_name, now, now, now))
         self._fts_set(doc_id, f"{title}\n{text}")
-        passages = _chunk_text(f"{title}\n{text}") or [title or doc_id]
+        passages = self._build_passages(title or "", text, title or doc_id)
         self._delete_chunks(doc_id)
-        for i, passage in enumerate(passages):
+        for i, p in enumerate(passages):
             cid = f"{doc_id}#{i}"
-            self.store.upsert(cid, self.embedder.embed(passage))
+            self.store.upsert(cid, self.embedder.embed(p["text"]))
             self.conn.execute(
-                "INSERT INTO chunks(chunk_id,doc_id,ordinal,text) VALUES(?,?,?,?)",
-                (cid, doc_id, i, passage))
+                "INSERT INTO chunks(chunk_id,doc_id,ordinal,text,section_text,section_type) "
+                "VALUES(?,?,?,?,?,?)",
+                (cid, doc_id, i, p["text"], p["section_text"], p["section_type"]))
         self.conn.commit()
 
     # ---- fts helper ------------------------------------------------------
@@ -596,7 +635,7 @@ class PaperFinder:
 
     # ---- hybrid search ---------------------------------------------------
     def search(self, query: str, k: int = 5, rrf_k: int = 60,
-               folder: Optional[str] = None) -> list[dict]:
+               folder: Optional[str] = None, section: Optional[str] = None) -> list[dict]:
         # keyword ranker (BM25 via FTS5)
         terms = re.findall(r"[a-z0-9]+", query.lower())
         kw_rank: dict[str, int] = {}
@@ -613,15 +652,18 @@ class PaperFinder:
 
         # dense ranker: nearest CHUNKS, pooled up to their documents (best passage wins)
         qv = self.embedder.embed(query)
-        doc_best: dict[str, tuple[float, str]] = {}   # doc_id -> (best score, chunk_id)
+        doc_best: dict[str, tuple] = {}   # doc_id -> (score, chunk_id, section_text, section_type)
         for cid, score in self.store.query(qv, 50):
             row = self.conn.execute(
-                "SELECT doc_id FROM chunks WHERE chunk_id=?", (cid,)).fetchone()
+                "SELECT doc_id, section_text, section_type FROM chunks WHERE chunk_id=?",
+                (cid,)).fetchone()
             if not row:
+                continue
+            if section and (row["section_type"] or "") != section:   # section-scoped retrieval
                 continue
             did = row["doc_id"]
             if did not in doc_best or score > doc_best[did][0]:
-                doc_best[did] = (score, cid)
+                doc_best[did] = (score, cid, row["section_text"], row["section_type"])
         dense_sorted = sorted(doc_best.items(), key=lambda x: x[1][0], reverse=True)
         dense_rank = {did: i for i, (did, _) in enumerate(dense_sorted)}
 
@@ -640,8 +682,14 @@ class PaperFinder:
                 df = d.get("folder") or ""
                 if df != folder and not df.startswith(folder + "/"):
                     continue
+            if section and doc_id not in doc_best:    # section-scoped: only docs with a matching span
+                continue
             passage = None
+            section_text = ""
+            section_type = None
             if doc_id in doc_best:
+                section_text = doc_best[doc_id][2] or ""
+                section_type = doc_best[doc_id][3]
                 pr = self.conn.execute(
                     "SELECT text FROM chunks WHERE chunk_id=?", (doc_best[doc_id][1],)).fetchone()
                 if pr and pr["text"]:
@@ -654,6 +702,8 @@ class PaperFinder:
                 "doi": d["doi"],
                 "embedded": d["embedding_model"] is not None,
                 "passage": passage,                   # the matching passage (the "why")
+                "section_text": section_text,         # verbatim heading of the matching chunk
+                "section_type": section_type,         # normalized bucket (None on flat-chunked docs)
                 "score": round(score, 5),
             })
             if len(out) >= k:

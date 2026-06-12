@@ -14,6 +14,11 @@ a down service).
 
     python3 examples/daily_run.py            # respects the once-per-day marker
     python3 examples/daily_run.py --force    # run now regardless of the marker
+    python3 examples/daily_run.py --folders "MyResearch,Shared"  # target other Drive folders
+
+The synced Drive folder defaults to MyResearch; override it with --folders (comma
+separated) here or with PAPERFINDER_DRIVE_FOLDERS in the environment, so the tool
+can point at any folder and be reused by others.
 
 Config is read from the repo .env, so it behaves the same under launchd as it does
 from a shell where you ran `source .env`.
@@ -70,29 +75,41 @@ def ollama_ready() -> bool:
         return False
 
 
-def run_sync(repo: str) -> int:
+def run_sync(repo: str, folders: str = None) -> int:
     """Run the existing sync entry point as a subprocess; it strips references in
     the embed pass and returns 0 on success (4 if Qdrant is not ready, etc.)."""
     script = os.path.join(repo, "examples", "drive_sync.py")
-    return subprocess.run([sys.executable, script]).returncode
+    cmd = [sys.executable, script]
+    if folders:
+        cmd += ["--folders", folders]
+    return subprocess.run(cmd).returncode
 
 
 def rebuild_graph_and_viz(repo: str):
     from paperfinder.cli import open_finder
     from paperfinder.graph.relationship import RelationshipGraph
     from paperfinder.graph.viz import build_viz
+    from paperfinder.graph.stats import write_graph_stats
     rel_db = os.environ.get("PAPERFINDER_REL_DB", "relationships.db")
     out = os.environ.get("PAPERFINDER_GRAPH_HTML", os.path.join(repo, "paper_graph.html"))
     pf = open_finder()
     rg = RelationshipGraph(rel_db)
     removed = rg.clear_candidates()
     proposed = pf.build_graph_candidates(rg, k=5)
-    build_viz(rg.export_graph(include_candidates=True), out)
-    return removed, proposed, out
+    export = rg.export_graph(include_candidates=True)
+    build_viz(export, out)
+    stats = write_graph_stats(export)
+    return removed, proposed, out, stats
 
 
 def main() -> int:
-    force = "--force" in sys.argv[1:]
+    argv = sys.argv[1:]
+    force = "--force" in argv
+    folders = None
+    if "--folders" in argv:
+        i = argv.index("--folders")
+        if i + 1 < len(argv):
+            folders = argv[i + 1]
     repo = repo_dir()
     load_env(repo)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -107,15 +124,15 @@ def main() -> int:
         print(f"[{stamp}] Ollama not ready; deferring (will retry on a later run)", flush=True)
         return 0
 
-    rc = run_sync(repo)
+    rc = run_sync(repo, folders)
     if rc != 0:
         print(f"[{stamp}] sync did not complete (drive_sync rc={rc}); deferring", flush=True)
         return 0
 
-    removed, proposed, out = rebuild_graph_and_viz(repo)
+    removed, proposed, out, stats = rebuild_graph_and_viz(repo)
     mark_done()
     print(f"[{stamp}] daily run ok | candidates cleared={removed} proposed={proposed} "
-          f"| graph html: {out}", flush=True)
+          f"| graph html: {out} | graph stats: {stats}", flush=True)
     return 0
 
 

@@ -58,10 +58,24 @@ def main() -> int:
     checks.append(("static: in-focus node gets a distinct bright highlight",
                    "FOCUSFILL" in static_html and "#ffd23f" in static_html
                    and "highlight: { background: FOCUSFILL" in static_html))
+    checks.append(("static: no render-blocking external font (renders offline)",
+                   "fonts.googleapis.com" not in static_html))
+    checks.append(("static: shows paper/node count incl. unconnected",
+                   'id="nodecnt"' in static_html and "papers (" in static_html and "unconnected" in static_html))
+    checks.append(("static: score slider floor lowered to 0", "thr.min = 0" in static_html))
+    checks.append(("node-open routes through server /open when interactive",
+                   'INTERACTIVE ? "/open?id="' in static_html))
+    checks.append(("static: unconnected papers are pinned out of the physics sim",
+                   "const isolated = G.nodes.filter" in static_html and "fixed: true" in static_html))
+    checks.append(("static: singletons placed relative to the cluster, then fit",
+                   "placeIsolated" in static_html and "getPositions" in static_html
+                   and "stabilizationIterationsDone" in static_html and "network.fit" in static_html))
     checks.append(("static: cross-folder emphasis toggle present",
                    'id="emph"' in static_html))
     checks.append(("static: cross-folder edge logic present",
                    "_cross" in static_html and "emphColor" in static_html))
+    checks.append(("static: node tooltip is a DOM element (no raw html string)",
+                   "title: tip" in static_html and "tip.innerHTML" in static_html))
     checks.append(("static: no review controls (panel/buttons absent, flag off)",
                    'id="rv-auth"' not in static_html and 'id="done"' not in static_html
                    and "INTERACTIVE = false" in static_html))
@@ -70,9 +84,8 @@ def main() -> int:
     checks.append(("interactive: review panel present", 'id="review"' in interactive_html
                    and 'id="rv-auth"' in interactive_html and 'id="rv-reject"' in interactive_html))
     checks.append(("interactive: endpoints wired",
-                   "/authenticate" in interactive_html and "/reject" in interactive_html
-                   and "/shutdown" in interactive_html))
-    checks.append(("interactive: Done button present", 'id="done"' in interactive_html))
+                   "/authenticate" in interactive_html and "/reject" in interactive_html))
+    checks.append(("interactive: Done button removed", 'id="done"' not in interactive_html))
     checks.append(("interactive: INTERACTIVE flag true", "INTERACTIVE = true" in interactive_html))
     checks.append(("interactive: chat panel off by default",
                    "CHAT = false" in interactive_html and 'id="chat-box"' not in interactive_html))
@@ -94,6 +107,11 @@ def main() -> int:
                    "multiselect: true" in chat_html and "synSel" in chat_html))
     checks.append(("chat: synthesis job wiring present",
                    "/synthesize" in chat_html and "/synthesis_status" in chat_html and "/download" in chat_html))
+    checks.append(("chat: selection is sent with the message",
+                   "selected: Array.from(synSel)" in chat_html))
+    checks.append(("chat: plain click opens, modifier-click selects",
+                   "window.open" in chat_html and "se.metaKey || se.ctrlKey" in chat_html
+                   and 'network.on("doubleClick"' not in chat_html))
 
     ok = True
     for name, passed in checks:

@@ -15,9 +15,16 @@ from paperfinder.studio import llm as _llm
 _REWRITE_SYSTEM = ("You rewrite a follow-up question into a single standalone search query. "
                    "Output only the query, with no preamble or quotation marks.")
 _ANSWER_SYSTEM = ("You are a research assistant answering questions about the user's own paper "
-                  "library. Use only the provided passages. Cite the papers you rely on by their "
-                  "title in square brackets, for example [Some Paper Title]. If the passages do "
-                  "not contain the answer, say so plainly and do not speculate.")
+                  "library. Use the passages for the contents of papers, and the graph-structure "
+                  "section (when present) for questions about the library's relationship graph "
+                  "itself, such as how many papers or connections there are, which papers link to "
+                  "which, a paper's neighbours, or which are most connected or isolated, or which "
+                  "papers the user currently has selected. Cite the "
+                  "papers you rely on by their title in square brackets, for example [Some Paper "
+                  "Title]. If neither the passages nor the graph section contains the answer, say "
+                  "so plainly and do not speculate. Answer naturally and conversationally; do not "
+                  "mention, quote, or name these context sections, and do not say that information "
+                  "was provided, listed, or selected for you.")
 
 
 def retrieve(finder, query: str, k: int = 8, folder=None) -> list:
@@ -57,7 +64,7 @@ def _rewrite_prompt(history, question: str) -> str:
             "context from the conversation. Output only the query.")
 
 
-def _answer_prompt(passages, history, question: str) -> str:
+def _answer_prompt(passages, history, question: str, graph_text: str = "") -> str:
     parts = []
     if history:
         parts.append("# Conversation so far")
@@ -73,8 +80,13 @@ def _answer_prompt(passages, history, question: str) -> str:
             parts.append("")
     else:
         parts.append("(no passages retrieved)\n")
+    if graph_text:
+        parts.append("# Graph structure")
+        parts.append(graph_text)
+        parts.append("")
     parts.append(f"# Question\n{question}\n\n"
-                 "Answer using only the passages above, citing papers by title.")
+                 "Answer the question. Use the passages for paper contents and the graph "
+                 "structure section for questions about the graph. Cite papers by title.")
     return "\n".join(parts)
 
 
@@ -96,22 +108,31 @@ def web_sources(sources) -> list:
 class ChatSession:
     """Holds conversation state for multi-turn chat over the library."""
 
-    def __init__(self, finder, k: int = 8, folder=None, frontier: bool = False, complete=None):
+    def __init__(self, finder, k: int = 8, folder=None, frontier: bool = False, complete=None,
+                 graph_text: str = ""):
         self.finder = finder
         self.k = k
         self.folder = folder
         self.frontier = frontier
         self._complete = complete or _llm.complete
+        if not graph_text:                      # fall back to the daily snapshot if present
+            try:
+                from paperfinder.graph.stats import load_graph_stats
+                graph_text = load_graph_stats()
+            except Exception:
+                graph_text = ""
+        self.graph_text = graph_text
         self.history = []                       # list[(role, text)]
 
-    def ask(self, question: str) -> dict:
+    def ask(self, question: str, graph_text=None) -> dict:
+        gt = self.graph_text if graph_text is None else graph_text
         standalone = question
         if self.history:                        # rewrite follow-ups so retrieval has context
             rewritten = self._complete(_rewrite_prompt(self.history, question),
                                        system=_REWRITE_SYSTEM, frontier=False, max_tokens=80)
             standalone = (rewritten or "").strip() or question
         passages = retrieve(self.finder, standalone, self.k, self.folder)
-        answer = self._complete(_answer_prompt(passages, self.history, question),
+        answer = self._complete(_answer_prompt(passages, self.history, question, gt),
                                 system=_ANSWER_SYSTEM, frontier=self.frontier, max_tokens=1000)
         self.history.append(("user", question))
         self.history.append(("assistant", answer))

@@ -41,11 +41,11 @@ def main():
 
     res1 = session.ask("What does my library say about telomerase and lifespan?")
     rewrites_after_t1 = sum(1 for c in calls if "Rewrite the follow-up" in c["prompt"])
-    answer_calls_t1 = [c for c in calls if "Answer using only the passages" in c["prompt"]]
+    answer_calls_t1 = [c for c in calls if "# Retrieved passages from the library" in c["prompt"]]
 
     res2 = session.ask("what about in mice?")
     rewrites_after_t2 = sum(1 for c in calls if "Rewrite the follow-up" in c["prompt"])
-    last_answer_prompt = [c for c in calls if "Answer using only the passages" in c["prompt"]][-1]["prompt"]
+    last_answer_prompt = [c for c in calls if "# Retrieved passages from the library" in c["prompt"]][-1]["prompt"]
 
     checks = [
         ("retrieval surfaces the on-topic paper first", hits and hits[0]["doc_id"] == "gdrive:tel"),
@@ -54,7 +54,7 @@ def main():
         ("turn 1 query is the verbatim question", res1["query"].startswith("What does my library")),
         ("turn 1 sources include the telomerase paper", any(s["doc_id"] == "gdrive:tel" for s in res1["sources"])),
         ("answer prompt embeds retrieved passage text", "extends replicative lifespan" in answer_calls_t1[0]["prompt"]),
-        ("grounding instruction present in answer system", "only the provided passages" in (answer_calls_t1[0]["system"] or "")),
+        ("grounding instruction present in answer system", "do not speculate" in (answer_calls_t1[0]["system"] or "")),
         ("turn 2 triggers a follow-up rewrite", rewrites_after_t2 == 1),
         ("turn 2 retrieves on the rewritten standalone query", res2["query"] == "telomerase lifespan in mice"),
         ("turn 2 answer prompt includes prior conversation", "# Conversation so far" in last_answer_prompt and "telomerase and lifespan" in last_answer_prompt.lower()),
@@ -73,6 +73,12 @@ def main():
         ("web_sources dedupes and keeps doc_id", [s["doc_id"] for s in ws] == ["gdrive:abc", "x"]),
         ("web_sources derives a Drive link", ws[0]["link"] == "https://drive.google.com/file/d/abc/view"),
         ("web_sources keeps an explicit url", ws[1]["link"] == "http://e/p2"),
+    ]
+
+    session.ask("how many papers are in the graph", graph_text="GXMARK 9 papers, 4 connections")
+    aprompt = calls[-1]["prompt"]
+    checks += [
+        ("graph_text injected into answer prompt", "GXMARK 9 papers" in aprompt and "# Graph structure" in aprompt),
     ]
 
     print("=== chat: multi-turn RAG over the library ===")

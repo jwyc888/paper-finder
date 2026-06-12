@@ -1,152 +1,234 @@
 # PAPER FINDER - MEMORY BANK
 
-**Version:** 3.0
-**Status:** Tier A complete and running live against a real Google Drive corpus, end to end: scoped crawl, reference stripping, chunked semantic embeddings in Qdrant, a cross-passage relationship graph with human review, and a self-maintaining daily run on macOS launchd. bge-small (`STEmbedder`) and Qdrant are the live defaults now, not pending wire-up.
-**Working name:** `paper-finder` (standalone; rename at will)
+**Version:** 4.0
+**Status:** Tier A + relationship layer + **studio/graph-window layer** BUILT and verified. The interactive graph window now hosts chat (ask-to-highlight), cluster-to-synthesis with background PDF export, and graph-structure reading. Live against a real Google Drive. See section 9 for the studio/graph-window layer.
+**Working name:** `paper-finder` (placeholder - broader than papers; rename at will)
 **Owner:** John Chan / BioRatio
-**Relationship to Cortex:** Standalone tool. Cortex orchestrates and calls it; the finder does not live inside Cortex. The integration seam is a shared canonical document identity (Drive file id / path / source URL / DOI).
-
----
+**Relationship to Cortex:** Standalone tool. Cortex is the orchestrator that *calls* it; the finder does not live inside Cortex.
 
 ## 0. Implementation status (what exists today)
 
-Installed as an editable package (`pip install -e .`, `paperfinder` command), so the repo is the live source Python imports. Test suites under `tests/`, each using throwaway DBs so the real index is never touched: `test_tier_a`, `test_relationship`, `test_drive_and_reconcile`, `test_filetypes`, `test_chunking`, `test_qdrant_store`, `test_connections`, `test_sectionstrip`, `test_viz`.
+Built, runs, and passes four self-test suites under `tests/` (`test_tier_a`,
+`test_relationship`, `test_drive_and_reconcile`, `test_filetypes`), each using its own
+throwaway DB so the real index is never touched. Installed as a package (`pip install -e .`,
+`paperfinder` command). Layout: `paperfinder/core/` (capture, finder, vectorstore),
+`paperfinder/graph/` (relationship, viz), plus `api.py`, `cli.py`, `sampledata.py`.
 
-Layout: `paperfinder/core/` (capture, finder, sectionstrip, vectorstore), `paperfinder/graph/` (relationship, viz), plus `api.py`, `cli.py`, `sampledata.py`. Day-to-day operation runs through scripts in `examples/`.
-
-Live and verified on the real corpus:
-
-- **Capture** (`core/capture.py`): `LocalFolderSource` + `GoogleDriveSource`, scoped and in place over a curation folder. `crawl()` follows Google Drive shortcuts (folder and file) to their targets, keyed to target id for dedup. Authenticated live via a **service account** (unattended, no token expiry), not interactive OAuth. Reconcile archives papers no longer reachable (row and authenticated edges preserved, reversible). Local index only, never writes to Drive.
-- **Core** (`core/finder.py`): SQLite job queue with durable rehydrate; parser (PDF via pypdf, Word via python-docx, PowerPoint via python-pptx, text/markdown); staged metadata pass (instant, FTS) then embed pass; hybrid search (FTS5 BM25 + dense, fused by RRF). `doc_id` is canonical identity. Embeddings are **chunk-level** (sliding window, roughly 350 words with overlap), stored per chunk and aggregated to documents by best passage. Images skipped by choice.
-- **Reference stripping** (`core/sectionstrip.py`): before chunking, references / bibliography / supplementary sections are removed while the body and appendix are kept. A regex finds candidate headings; a local OpenAI-compatible LLM (Ollama) adjudicates each candidate's type; removal is section-aware (an appendix that follows the references is preserved). Opt-in via `PAPERFINDER_STRIP_SECTIONS`. Safe fallbacks: no candidates, an unreachable endpoint, or unparseable output leave the text untouched, so body is never lost. Cleaned text is persisted to `full_text` so it is not re-stripped on later passes.
-- **Vector store** (`core/vectorstore.py`): `VectorStore` interface + `make_store`. `BruteForceStore` (dev default, verified); `QdrantStore` is the live backend, keyed by opaque chunk id; `SqliteVecStore` written but unverified. The live deployment uses a dedicated Qdrant container on host port 6533.
-- **Embedder**: `STEmbedder` (bge-small via sentence-transformers) is the live default, selected by `PAPERFINDER_EMBEDDER=st`. `HashingEmbedder` is the dependency-free fallback; it uses a stable hash (blake2b), not Python's salted `hash()`, so its vectors are reproducible across processes.
-- **Relationship graph** (`graph/relationship.py`): provenance-bearing edges (human / inferred x candidate / authenticated / rejected). Candidate edges come from **cross-document chunk neighbours**: the nearest passage in another paper, carrying both passages as `evidence`. `record_candidate`, `authenticate`, `reject`, and `clear_candidates` (drops inferred candidates while preserving human verdicts, so a rejected pair stays suppressed). Keyed by `doc_id`; survives re-embed and rebuild.
-- **Connection engine** (`finder.propose_connections`, `finder.build_graph_candidates`): for each document, find the nearest passages in other documents, keep each other document's best passage pair, and record candidate edges. Decoupled from the graph module by duck typing.
-- **Visualization + review** (`graph/viz.py`, `examples/show_graph.py`): `render_html` produces an interactive vis-network page; `build_viz` writes the static file used by the automation. Edge tooltips show the connecting passages; a score-threshold slider hides weak links; labels are compacted and wrapped; clicking a node opens its source. `show_graph.py` stands up an ephemeral local stdlib HTTP server (no Flask dependency) so edges can be Authenticated or Rejected by click, writing to the relationship DB, then stops itself on "Done" or Ctrl-C.
+- **Capture seam** (`core/capture.py`): `LocalFolderSource` + `GoogleDriveSource`
+  - scoped, **in-place**, over a curation folder: `crawl()` follows **Google Drive
+  shortcuts** (folder + file) to their targets even outside the folder, keyed to target id
+  (dedup); `poll()` watches resolved folders for new papers; `find_folder_ids` resolves
+  names→ids; `run_backfill` drives it. Mix of physically-moved folders and shortcuts
+  supported. Shared Drives intentionally out of scope. **Verified live against a real Drive.**
+  Note: aliases must be **Drive shortcuts**, not macOS Finder aliases - a Finder alias syncs
+  as opaque `application/drive-fs.osx.alias` the API can't resolve; the crawl warns and skips it.
+- **Reconcile** (`PaperFinder.reconcile`, run by `backfill`): papers no longer reachable
+  (deleted, or folder/shortcut removed) are **archived** - dropped from search, row + authenticated
+  relationships preserved, reversible on re-index. Local index only, never touches Drive.
+- **Core** (`core/finder.py`): SQLite job queue with durable rehydrate, parser
+  (**PDF via pypdf, Word via python-docx, PowerPoint via python-pptx, text/markdown**; Office
+  formats need the `office` extra and degrade gracefully without it), staged metadata pass
+  (instant, FTS) + embed pass (full text + vectors), hybrid search (FTS5 BM25 + dense, fused by
+  RRF). `doc_id` = canonical identity. **Images (.png) skipped by choice** (no text to embed).
+- **Vector seam** (`core/vectorstore.py`): `VectorStore` interface + `make_store` factory.
+  `BruteForceStore` (default, **verified**); `SqliteVecStore`, `QdrantStore` written but
+  **untested here** - verify against installed versions. Progression: brute-force → sqlite-vec
+  (true swap, same file) → qdrant (separate service, dual-store).
+- **Embedder**: `HashingEmbedder` default (lexical stand-in, dependency-free); `STEmbedder`
+  (bge-small via sentence-transformers) selectable by `PAPERFINDER_EMBEDDER=st` - untested here.
 - **Query API** (`api.py`): `/search`, `/document/{id}`, `/graph` for Cortex.
-- **CLI** (`cli.py`): `sample | backfill | poll | search | viz | serve`. Reads `.env`.
+- **CLI** (`cli.py`): `sample | backfill | poll | search | viz | serve`. Reads `.env`
+  (python-dotenv). Env: `PAPERFINDER_DB`, `PAPERFINDER_REL_DB`, `PAPERFINDER_EMBEDDER`,
+  `PAPERFINDER_VECTOR_STORE`.
+- **Relationship layer** (`graph/relationship.py`, `graph/viz.py`): provenance-bearing edges
+  (human/inferred × candidate/authenticated/rejected), candidate generation from embeddings,
+  read-only graph viz. Plugs into the finder's index by shared `doc_id`; verified to survive re-embed.
 
-Verified properties: backfill indexes a folder in one pass; just-dropped docs are findable from the metadata pass before embedding; chunking finds content buried past the single-vector truncation horizon; reference stripping removes bibliography-driven edges from the graph while preserving genuine content ties (a spurious IBD / IL-1a link became one grounded in shared NF-kB / MAPK / TNFa content); human-verified edges survive a full re-embed and rebuild; the live Drive crawl follows a real shortcut and indexes the target in place.
+Verified properties: backfill indexes a folder in one pass; just-dropped docs findable from the
+metadata pass before embedding; relevant ranked above noise; results carry canonical id + link;
+the staged gap (generic first page, on-topic body) closes after the embed pass; identities and
+human-verified edges survive a full re-embed; `.docx`/`.pptx` extracted and searchable; the live
+Drive crawl follows a real shortcut and indexes the target folder's documents in place.
+
+Remaining wire-up (not yet done): swap `STEmbedder` in for real semantic recall before indexing
+the full corpus; benchmark before deciding on sqlite-vec/Qdrant. Optional later: OCR or a vision
+caption for images; native Google Docs export.
 
 ---
 
 ## 1. Purpose
 
-Semantic + metadata recall over a personal document repository so already-collected material on a topic can be found fast, even when scattered across many project folders and a Google Drive. Secondary payoff: surfacing connections across papers. Driving example: "I researched patient sentiment toward AI chatbots a few days ago and found good papers, but I do not know which folder they are in." The tool answers "what do I already have on X, and where is it," and "which of my papers connect."
+Semantic + metadata recall over a personal document repository (PDFs, URLs, publications) so that already-collected material on a topic can be found fast - even when it is scattered across many project folders and a Google Drive. Secondary payoff: surfacing connections across projects.
+
+Driving example: "I researched patient sentiment toward AI chatbots in medicine a few days ago and found good papers, but I don't know which folder they're in." The tool answers *"what do I already have on X, and where is it."*
 
 ## 2. Scope boundary (what this is NOT)
 
-- A find / recall / connect tool, not a deep-reading tool. Deep reading is the literature pipeline's job; the finder hands a document identity to the pipeline (via Cortex) when depth is wanted.
-- The finder and the literature pipeline keep separate indexes (different embedding models, different jobs). They agree only on canonical document identity, which is the integration seam.
+- This is a **find / recall / connect** tool, not a deep-reading tool.
+- Deep reading of a found document is the **literature pipeline's** job. The finder hands a document identity to the pipeline (via Cortex) when depth is wanted.
+- The two keep **separate indexes** (different embedding models, different jobs). They agree only on a **canonical document identity**: file path + Google Drive file ID + source URL + DOI (when present). That shared identity is the integration seam.
 
 ## 3. Core architecture decisions
 
-1. **Three separate concerns.** Finder (recall / connect), literature pipeline (deep read), Cortex (orchestration). Linked on demand, not merged.
-2. **Staged ingestion.** Metadata pass now (findable within minutes), embed pass after (full semantic recall).
-3. **Deterministic pipeline, with one local-LLM step.** Detection, parsing, chunking, embedding, upsert are a plain pipeline. The only LLM in the path is reference-section adjudication during ingest, run locally (Ollama) so the pipeline stays offline, free, and reproducible. Connection suggestion is geometric (chunk neighbours), not an LLM.
-4. **Chunking over whole-document vectors.** A single 512-token-truncated vector missed buried content and produced weak connections. Chunk-level embeddings find the matching passage and power passage-level connection evidence. Chosen because connections and serendipitous recall are the goal and the corpus is heading toward thousands of papers.
-5. **Qdrant as the live dense store.** Matches the rest of the stack (always-on container). Brute-force remains the dev/test scaffold.
-6. **Reference stripping before chunking.** Bibliographies look alike across papers (shared citations, formatting) and manufactured high-similarity edges. Stripping them, while keeping the appendix, makes connections content-driven. A small local model (Qwen 7-8B) is enough; the task is easy.
-7. **Graph from chunk neighbours with passage evidence.** Candidate edges are the nearest cross-document passage pair, stored with both passages so a human can see why two papers connect before authenticating.
-8. **Ephemeral review server.** The interactive graph is served by a short-lived local stdlib server only during a review session, not an always-on service, and not a separate terminal step.
-9. **Two pluggable interfaces** (capture-source, vector-store) keep Tier A to Tier B additive rather than a rewrite.
+1. **Three separate concerns.** Finder (recall/connect) · Literature pipeline (deep read) · Cortex (orchestration + chaining). Linked on demand, not merged.
+2. **Staged ingestion.** Two passes per document:
+   - *Metadata pass* - runs immediately on drop. Extracts filename, path, dates, title, source URL, DOI, first-page/first-screen text. Item is **findable within minutes**, before embedding.
+   - *Embed pass* - runs in the background / batched. Full-text parse + embed for deep semantic recall.
+   - This is metadata-*now-then*-embed, not metadata-*instead-of*-embed.
+3. **Deterministic pipeline, not an agent.** Detection, parsing, embedding, upsert are a plain pipeline (reliable, cheap, no LLM). LLM is reserved for the genuinely fuzzy work - project classification, title cleanup from junk filenames, dedup, and cross-project connection suggestions. None of that is in v0.
+4. **Two pluggable interfaces** are the reason A→B is additive rather than rework:
+   - *Capture-source interface* - one operation: yield new/changed documents since the last checkpoint. v0 implements it via the Google Drive API.
+   - *Embed-worker interface* - execution target for the embed pass. v0 = local Mac. Later targets: AWS on-demand batch. Selected by policy / Cortex.
+5. **Landing zone = a designated Google Drive folder. Change detection via the Drive API** (changes endpoint). Chosen over a local watched folder because it avoids the Drive-desktop placeholder/streaming gotcha, gives one unified inbox reachable from any device, and makes A→B a pure relocation (detector is already API-based). Cost accepted: Drive OAuth + a Google Cloud project + token-refresh handling, pulled into Tier A.
+6. **Hybrid search.** Dense vectors + keyword. v0 store = `sqlite-vec` (dense) + FTS5 (keyword), consistent with Cortex and light on the Jetson later. Qdrant (native hybrid/RRF, as in the literature pipeline) is the heavier alternative if needed.
 
-## 4. Pipeline (current, live)
+## 4. Tiers
 
+### Tier A - build now (all on Mac, when awake)
+- Landing: a Google Drive folder ("inbox").
+- Drive API poller → enqueues jobs into a SQLite job queue (status: pending/processing/done/failed; Drive `changes` pageToken as checkpoint).
+- Workers on the Mac: metadata pass (instant) and embed pass (background), both upsert into a **local** index (`sqlite-vec` + FTS5).
+- Query API endpoint Cortex calls; returns ranked documents with canonical identity + metadata + Drive link.
+- One-time **backfill** over existing Drive folder(s) so the current corpus is indexed without manual per-file work.
+- Loss vs always-on: ingestion/embedding only happen while the Mac is awake. Acceptable - embeddings are needed eventually, not in real time.
+
+### Tier B - later (always-on capture, opportunistic + overflow compute)
+- Relocate the cheap always-on components to the **Jetson** (always-on node): poller, queue, metadata pass, **index**, query API. Dropping and searching now work 24/7.
+- **Mac stays the embed worker** (drains the queue when awake).
+- **AWS becomes an optional on-demand batch embed worker** draining the same queue (big backfills, or when the queue gets too deep). No standing infra.
+- A→B = relocation behind the two interfaces, not a rewrite.
+
+### Tier C - rejected
+True always-on *real-time cloud embedding* (24/7 standing cloud infra). Buys nothing for this use case - finding recently-collected papers does not need sub-minute embedding latency, and the queue already guarantees "eventually." Note: "handle processing to AWS later" (decision 4 / Tier B) is an **on-demand batch worker**, which is explicitly NOT Tier C.
+
+## 5. Hardware notes
+- Mac: M5 Max, 64GB RAM. Comfortably runs a stronger general embedder than bge-small and overnight batches; can also dispatch heavy jobs to AWS.
+- Jetson (reComputer J1020 v2, 4GB, JetPack 4.6.1): suitable as poller / queue / metadata extractor / index host only. **Never the embedder** - 4GB + aging JetPack makes parsing/embedding painful. Treat its age as a liability if asked to do more.
+
+## 6. Success criteria (Tier A / v0)
+1. Drop recent "patient sentiment toward AI chatbots" papers into the Drive inbox; query the way the need is actually phrased → correct document(s) ranked above noise.
+2. A just-dropped item is findable via the metadata pass **within minutes**, before its embedding completes.
+3. Results return a Drive link + canonical identity, so Cortex can hand the document to the literature pipeline.
+4. Backfill of the existing corpus is indexed with no manual per-file work.
+
+When these hold, v0 is done - do not gold-plate.
+
+Known v0 gap to measure, not pre-solve: a document whose *content* matches the topic but whose filename and first page are uninformative (e.g. `download(3).pdf` with a generic abstract page) may be missed by the metadata pass until the embed pass catches it. Track how often this bites before investing further.
+
+## 7. Deferred / open (not v0)
+- Embedding model choice: bge-small (Cortex default) vs a stronger general model (bge-large / mxbai-embed-large / nomic-embed-text) given 64GB headroom. Decide at v0 validation.
+- LLM connection-suggestion layer (cross-project linking).
+- Dedup and automatic project classification.
+- AWS on-demand batch worker implementation.
+- Tier B relocation to the Jetson.
+- `sqlite-vec` + FTS5 vs Qdrant final call (defer until corpus size / hybrid-quality data exists).
+
+## 8. Diagrams
+
+### Tier A - all on Mac when awake
+```mermaid
+flowchart TD
+  drive["Google Drive inbox<br/>PDFs, URLs"] --> poller
+  subgraph mac["Mac - runs when awake"]
+    poller["Drive poller"] --> queue["Job queue / SQLite"]
+    queue --> meta["Metadata pass - instant"]
+    queue --> embed["Embed pass - background"]
+    meta --> index[("Index<br/>sqlite-vec + FTS5")]
+    embed --> index
+    index --> api["Query API"]
+  end
+  api --> cortex["Cortex - orchestrator"]
+  cortex --> lit["Literature pipeline - deep read"]
 ```
-Drive (curation folder)
-  -> sync (service account crawl + reconcile)
-  -> metadata pass (instant, FTS)
-  -> reference strip (local LLM, opt-in)        [core/sectionstrip.py]
-  -> chunk (sliding window) + embed (bge-small) [core/finder.py]
-  -> Qdrant (per-chunk vectors, port 6533)      [core/vectorstore.py]
-  -> connection engine (cross-doc chunk neighbours)
-  -> relationship graph (candidate edges + passage evidence)
-  -> human review (authenticate / reject)       [examples/show_graph.py]
-  -> static graph HTML (regenerated daily)       [graph/viz.py]
+
+### Tier B - always-on capture, compute on Mac/AWS
+```mermaid
+flowchart TD
+  drive["Google Drive inbox"] --> poller
+  subgraph jetson["Jetson - always-on"]
+    poller["Drive poller"] --> queue["Job queue"]
+    queue --> index[("Index<br/>sqlite-vec + FTS5")]
+    index --> api["Query API"]
+  end
+  queue --> worker["Embed worker<br/>Mac now, AWS overflow"]
+  worker --> index
+  api --> cortex["Cortex"]
+  cortex --> lit["Literature pipeline"]
 ```
 
-## 5. Operations
+## 9. Studio + graph window layer (chat, synthesis, graph-reading)
 
-- **`examples/daily_run.py`**: the once-a-day pipeline. Sync (with stripping), clear stale inferred candidates, rebuild the graph, regenerate `paper_graph.html`. Loads `.env` itself so it runs the same under launchd. A marker at `~/.paperfinder/last_run` limits it to one real run per day. Defers without marking done if Ollama or Qdrant are not up, so a later run retries rather than ingesting unstripped papers.
-- **`examples/daily_run.py --force`**: manual trigger. Same pipeline, ignores the daily marker (use after adding papers). Readiness still enforced.
-- **`examples/show_graph.py`**: interactive review session (ephemeral server, click to authenticate / reject, click a node to open the source, "Done reviewing" to stop).
-- **`examples/build_graph.py`**: rebuild and print the candidate graph with evidence, for manual inspection.
-- **`examples/drive_sync.py`**: sync only (called by `daily_run` as a subprocess).
-- **Scheduling**: LaunchAgent `com.bioratio.paperfinder.daily` (RunAtLoad + 3h StartInterval; the daily gate keeps it to one real run). Log at `~/Library/Logs/paperfinder-daily.log`. Template in `examples/com.bioratio.paperfinder.daily.plist`; `install_automation.sh` generates the filled-in copy. This replaced the old fixed 2:30am `...sync` agent, which only fired when awake and logged in.
-- **Qdrant**: dedicated container, e.g. `docker run -d --name paperfinder-qdrant --restart unless-stopped -p 6533:6333 -p 6534:6334 -v paperfinder_qdrant_storage:/qdrant/storage qdrant/qdrant`.
-- **Ollama** (for stripping): a small Qwen (the architecture the MLX backend accelerates). Enable MLX with `OLLAMA_USE_MLX=1` set for the process that runs the server; for the menu-bar app use `launchctl setenv OLLAMA_USE_MLX 1` then relaunch. MLX support is per-architecture (Qwen yes, Llama falls back to Metal).
+Built on top of Tier A + the relationship layer. All of it lives behind an opt-in
+`--chat` flag on the interactive graph window, plus a small `studio/` package. The
+review-only window (no `--chat`) is unchanged and lightweight.
 
-## 6. Config (.env or environment)
+### 9.1 studio/ package (utilization)
+- `studio/llm.py`: one routable completion seam `complete(prompt, system, frontier, max_tokens, timeout)`.
+  Local OpenAI-compatible (Ollama, `PAPERFINDER_LLM_URL`/`PAPERFINDER_LLM_MODEL`) by default;
+  Anthropic when `frontier=True` (`PAPERFINDER_FRONTIER_MODEL`, default `claude-sonnet-4-6`,
+  `ANTHROPIC_API_KEY`). No new deps for the local path. This seam is the natural hook for agents.
+- `studio/studyset.py`: `Paper`, `Connection`, `StudySet` dataclasses; `build_studyset(finder, rel_graph, doc_ids)`
+  assembles the selected papers (title/folder/source_url/full text) plus the edges among them
+  (with passage evidence); `ids_for_folder(finder, folder)` selector helper. StudySet is plain
+  data with no DB handle, so it is safe to hand to a background thread.
+- `studio/synthesis.py`: `synthesize(studyset, frontier, complete, max_tokens)` map-reduce
+  (per-paper summary then a cross-paper reduce); `compare_models(studyset, complete)` runs local
+  + frontier on the same set, timed.
+- `studio/chat.py`: `retrieve(finder, query, k, folder)` (top-k chunk passages, folder-scoped);
+  `ChatSession(finder, k, folder, frontier, complete, graph_text)` multi-turn RAG (rewrites
+  follow-ups, answers grounded in passages, cites by title); `web_sources(sources)` dedupes to
+  `[{doc_id,title,link}]` for the UI; the answer prompt also carries a graph-structure section
+  (see 9.4). CLI (`examples/chat.py`) and a standalone browser window (`examples/chat_web.py`).
+- `studio/export.py`: `synthesis_to_pdf(markdown, out_path, title, paper_titles)` renders a brief
+  to PDF with **reportlab** (pure-Python dep; `pip install reportlab`). Lazily imported, with a
+  clear error if missing.
 
-| var | values | default |
-|-----|--------|---------|
-| `PAPERFINDER_DB` | path | `paperfinder.db` |
-| `PAPERFINDER_REL_DB` | path | `relationships.db` |
-| `PAPERFINDER_EMBEDDER` | `hashing` \| `st` | `hashing` (live: `st`) |
-| `PAPERFINDER_VECTOR_STORE` | `bruteforce` \| `sqlite-vec` \| `qdrant` | `bruteforce` (live: `qdrant`) |
-| `PAPERFINDER_QDRANT_URL` | URL | `http://localhost:6533` |
-| `PAPERFINDER_QDRANT_COLLECTION` | name | `paperfinder_chunks` |
-| `PAPERFINDER_SA_KEY` | path | `service_account.json` |
-| `PAPERFINDER_DRIVE_FOLDERS` | comma list | `MyResearch` |
-| `PAPERFINDER_STRIP_SECTIONS` | `1` to enable | unset (off; live: on) |
-| `PAPERFINDER_LLM_URL` | OpenAI-compatible base URL | `http://localhost:11434/v1` |
-| `PAPERFINDER_LLM_MODEL` | model tag | `llama3.1:8b` (live: a small Qwen) |
-| `PAPERFINDER_GRAPH_HTML` | path | `paper_graph.html` |
-| `PAPERFINDER_REVIEW_PORT` | port | `8765` |
-| `HF_HUB_OFFLINE` | `1` to avoid network model lookups | unset |
+### 9.2 Graph window: chat (ask-to-highlight)
+`examples/show_graph.py --chat` loads the index once and runs single-threaded so the shared
+embedder/SQLite stay on one thread. A docked chat panel (`viz.py`) posts to a `/chat` endpoint;
+the answer's source papers are returned as doc_ids and the page highlights + zooms to them
+(`focusNodes`). The panel is resizable (corner grip, flexing transcript), draggable by its title
+bar, and has a Max/Restore button. The in-focus node fills bright gold (`FOCUSFILL #ffd23f`,
+distinct from folder colors), reverting on the next highlight.
 
-## 7. Tiers
+### 9.3 Graph window: cluster-to-synthesis with background PDF
+Multi-node selection is on (`multiselect`); in chat mode clicking a node toggles it into a
+selection set (`synSel`, shown gold), double-click opens the paper. "Synthesize selected" POSTs
+the doc_ids to `/synthesize`. The handler builds the study set **on the request thread** (the only
+part touching the shared index), then spawns a **background worker** that only runs `synthesize`
+(LLM calls) and `synthesis_to_pdf` (reportlab) - neither touches SQLite/embedder, so chat stays
+live while it computes. Job state is tracked in a locked `JOBS` dict; the page polls
+`/synthesis_status?id=` and, when done, shows a Download PDF link served by `/download?id=`
+(also written to `studysets/synthesis-<id>.pdf`). Local-vs-frontier follows the window's `--frontier`.
 
-- **Tier A (built, live).** Everything above, on the Mac, self-maintaining via launchd when the machine is on and the services are up. The 2:30am idea was dropped in favour of run-at-login plus interval with a once-per-day gate, since a personal laptop is not a server.
-- **Tier B (later).** Relocate the cheap always-on parts (poller, queue, metadata pass, index, query API) to the Jetson; Mac stays the embed worker; AWS optional on-demand batch. A to B is relocation behind the two interfaces, not a rewrite.
-- **Tier C (rejected).** Always-on real-time cloud embedding. The queue already guarantees "eventually," and recall does not need sub-minute latency.
+### 9.4 Graph-reading (graph structure for the LLM)
+`graph/stats.py`: `graph_digest(export)` produces a compact, **deterministic** text digest of the
+relationship graph - exact node/edge counts, authenticated-vs-candidate split, folder tallies,
+most-connected and isolated papers, and a per-paper adjacency list (neighbours strongest-first,
+with score + status). Numbers are computed in code so the model only relays them. `neighbours`
+means relationship-graph edges (what the graph draws), not embedding similarity.
+- The **daily run** (`examples/daily_run.py` -> `write_graph_stats`) captures the digest to
+  `~/.paperfinder/graph_stats.md` after rebuilding the graph.
+- `ChatSession` loads that snapshot by default (so the CLI/web chat gain graph awareness); the
+  graph window overrides it per turn with a **live** digest (reflects mid-session authenticate/reject).
+- Injected as a `# Graph structure` section in the answer prompt; the answer system prompt permits
+  answering structural questions from it. Known limitation (by design, see roadmap): this is
+  context injection, so answers about the graph are accurate but a bit wooden. Richer, more
+  flexible behavior (the model deciding to query the graph, run nearest-neighbour, synthesize,
+  follow up) is the motivation for the **local-agents** work (see LOCAL_AGENTS_KICKOFF.md).
 
-## 8. Hardware notes
+### 9.5 Tests (all dep-light, throwaway state)
+`test_viz` (page wiring: chat panel, focus color, multiselect, synth wiring), `test_chat`
+(retrieval grounding, rewrite, web_sources, graph_text injection), `test_graph_chat` (the
+`/chat`, `/synthesize` + background job + `/synthesis_status` + `/download` glue with a stub
+session), `test_export` (valid PDF), `test_graphstats` (digest counts/neighbours/isolated),
+plus the existing `test_connections`, `test_studio`.
 
-- Mac: M5 Max, 64GB. Runs bge-small and the small Qwen comfortably (the 27B is fine as a one-off but overkill for stripping). Ollama 0.19+ uses the MLX backend on Apple Silicon (32GB+), which the M5 Max accelerates via its GPU neural accelerators.
-- Jetson (reComputer J1020 v2, 4GB, JetPack 4.6.1): poller / queue / metadata / index host only. Never the embedder.
+### 9.6 Delivery
+Shipped as a single self-installing script (`install_graph_chat.sh`) that writes each file to its
+import-derived path and self-verifies via sha256. New runtime dependency: **reportlab** (PDF export only).
 
-## 9. Success criteria (Tier A / v0) - status
-
-1. Topic query returns the right documents above noise. **Met** (with bge-small + chunking).
-2. A just-dropped item is findable via the metadata pass within minutes. **Met.**
-3. Results return a Drive link + canonical identity for hand-off. **Met.**
-4. Backfill indexes the existing corpus with no manual per-file work. **Met.**
-5. (Added) Connections are content-driven, not bibliography artifacts, and reviewable. **Met** (stripping + chunk-neighbour graph + review).
-
-## 10. Deferred / open (by design)
-
-- Embedding model upgrade beyond bge-small given 64GB headroom (bge-large / mxbai / nomic): measure on the real corpus first.
-- `sqlite-vec` validation; batch-upsert optimization for large Qdrant backfills.
-- Image OCR / vision captions; native Google Docs export.
-- Citation extraction from references for the graph (would require capturing references before stripping rather than after).
-- Idea / concept nodes; descriptors on edges; section-aware chunking.
-- Tier B relocation; AWS on-demand batch worker.
-- Cross-domain weak ties (non-biomedical papers linking on generic ML vocabulary) are accepted as honest low signal, not pruned.
-
-## 11. Hard-won lessons / gotchas
-
-- Aliases must be Google Drive **shortcuts**, not macOS Finder aliases (the latter sync as opaque `drive-fs.osx.alias` the API cannot resolve).
-- Sharing a folder with the service account from a normal browser can hang on extension interference; an incognito window works.
-- `daily_run.py` loads `.env` itself, so the LaunchAgent does not need to replicate config.
-- Stripping silently no-ops if Ollama is down, so `daily_run` defers (does not mark the day done) when it is not ready.
-- `reembed_all` deletes a document's old chunks from Qdrant before re-adding, so a re-embed does not leave orphaned (un-stripped) vectors.
-- Editable install: the repo is the imported source. A stray copy in the wrong directory (for example a top-level `graph/`) is an orphan and should be removed.
-- Repo hygiene: `paper_graph.html`, `install_*.sh`, `*.db`, `graph_viz*.html`, caches, and secrets are gitignored or removed; only the package, examples, tests, docs, and config templates are tracked.
-
-## 12. Repo layout
-
-```
-paperfinder/        core/ (capture, finder, sectionstrip, vectorstore)
-                    graph/ (relationship, viz)
-                    api.py, cli.py, sampledata.py
-examples/           daily_run, drive_sync, show_graph, build_graph,
-                    drive_example, diagnose_drive, check_service_account,
-                    com.bioratio.paperfinder.daily.plist (template)
-tests/              one suite per concern, throwaway DBs
-docs/               this memory bank, RUNBOOK.md
-scripts/            paperfinder-status.sh
-pyproject.toml, requirements.txt, .env.example, .gitignore, README.md
-```
+### 9.7 Conventions reaffirmed this layer
+No em-dashes in any generated file. Minimum code; complete replacement files; surface tradeoffs
+before building; one question at a time; define success criteria and verify (every feature was
+run in a sandbox copy of the repo before delivery).
